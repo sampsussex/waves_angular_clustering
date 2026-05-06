@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import treecorr
+import pandas as pd
 
 class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_name,
@@ -20,6 +21,8 @@ class AngularClustering:
         self.cat_units = cat_units
         self.rand_units = rand_units
         self.nbins = nbins
+
+        self._make_catalogs()
 
     def _make_catalogs(self):
 
@@ -43,7 +46,15 @@ class AngularClustering:
 
         rr.process(self.rand_cat)
 
-        #self.xi, self.rr = dd.calculateXi(rr=rr, dr=dr)
+        self.xi, self.varxi = dd.calculateXi(rr=rr, dr=dr)
+
+        self.meanlogr = dd.meanlogr
+    
+
+    def save_results(self, save_location):
+        save_df = pd.DataFrame({'meanlogr': self.meanlogr, 'xi': self.xi, 'varxi': self.varxi})
+        save_df.to_csv(save_location, index=False)
+    
 
     def clean_up(self):
         del self.data_cat
@@ -52,7 +63,7 @@ class AngularClustering:
         del self.dr
         del self.rr
 
-    # Need to work out how to save catalogs and correlation results.
+    # Need to work out how to save catalogs correlation res, and errors.
 
 
 class WavesWideClustering:
@@ -73,42 +84,112 @@ class WavesWideClustering:
         self.n_randoms_filepath = n_randoms_filepath
         self.s_randoms_filepath = s_randoms_filepath
 
-        columns_to_load = ['uberID', 'RAGaia', 'DecGaia', 'class', 'mag_Zt']
+        self.data_ra_col = 'RAGaia'
+        self.data_dec_col = 'DecGaia'
+        self.randoms_ra_col = 'RA'
+        self.randoms_dec_col = 'Dec'
 
+        self.columns_to_load_photom = ['uberID', self.data_ra_col, self.data_dec_col, 'class', 'mag_Zt', 'mask', 'starmask', 'ghostmask', 'duplicate']
+        self.columns_to_load_stargal = ['uberID', 'stargal']
+        self.columns_to_load_randoms = [self.randoms_ra_col, self.randoms_dec_col, 'mask', 'starmask', 'ghostmask']
 
-        ghostmask_selection = ['No ghostmask', 'with ghostmask']
-        target_selection = ['galaxy-galaxy', 'star-star']
-        survey_depth = ['Z < 21.1', 'Z < 21.25', 'Z < 22']
-        photo_z_selection = ['Wide Photo-z', 'Deep Photo-z']
+        target_selection = ['galaxy', 'galaxy/ambiguous', 'star'] # defo same plot
+        ghostmask_selection = ['no ghostmask', 'with ghostmask'] # defo same plot
+        survey_depth = ['Z<21.1', 'Z<21.25', 'Z<22'] # Defo not same plot
         star_gal_method = ['TOPZ+SFM', 'Baseline', 'UMAP']
-
-
-        selections = [
-            'galaxy-galaxy WavesWide', 
-            'star-star WavesWide',
-            'galaxy-galaxy WavesWide with ghostmask',
-            'star-star WavesWide with ghostmask'
-            ]
         
         mag_slice_cuts = np.array([17, 18, 19, 20, 21, 22])
 
-        selection_mag_slices = []
-        for mag_slice in range(len(mag_slice_cuts)-1):
-            selection_mag_slices.append(f'galaxy-galaxy WavesWide with ghostmask and {mag_slice_cuts[mag_slice]} < mag_Zt < {mag_slice_cuts[mag_slice+1]}')
+        possible_selections = {
+            'target_selection': target_selection,
+            'ghostmask_selection': ghostmask_selection,
+            'survey_depth': survey_depth,
+            'star_gal_method': star_gal_method,
+        }
 
-    def _load_data(self):
-        return None
+        selections_to_run = {
+            'target_selection': ['galaxy', 'galaxy/ambiguous', 'star'],
+            'ghostmask_selection': ['no ghostmask', 'with ghostmask'],
+            'survey_depth': ['Z<21.25'],
+            'star_gal_method': ['TOPZ+SFM'],
+        }
+
+
+
+    def _load_data(self, photom_filepath, stargal_filepath, selection):
+        df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
+        df_stargal = pd.read_csv(stargal_filepath, usecols=self.columns_to_load_stargal)
+        # ensure uberID has type int64 for both dfs
+        df['uberID'] = df['uberID'].astype(np.int64)
+        df_stargal['uberID'] = df_stargal['uberID'].astype(np.int64)
+        
+        df = df.merge(df_stargal, on='uberID', how='left')
+
+        base_selection = (df['duplicate'] == False) & (df['mask'] == False) & (df['starmask'] == False)
+
+
+        if selection['target_selection'] == 'galaxy':
+            base_selection &= df['stargal'] == 'galaxy'
+        elif selection['target_selection'] == 'galaxy/ambiguous':
+            base_selection &= (df['stargal'] == 'galaxy') | (df['stargal'] == 'ambiguous')
+        elif selection['target_selection'] == 'star':
+            base_selection &= df['stargal'] == 'star'
+
+        if selection['ghostmask_selection'] == 'with ghostmask':
+            base_selection &= df['ghostmask'] == False
+
+        if selection['survey_depth'] == 'Z<21.1':
+            base_selection &= df['mag_Zt'] < 21.1
+        elif selection['survey_depth'] == 'Z<21.25':
+            base_selection &= df['mag_Zt'] < 21.25
+        elif selection['survey_depth'] == 'Z<22':
+            base_selection &= df['mag_Zt'] < 22
+
+        ra_data = df.loc[base_selection, self.data_ra_col].values
+        dec_data = df.loc[base_selection, self.data_dec_col].values
+        return ra_data, dec_data
+    
+
+    def _load_randoms(self, randoms_filepath, selection):
+        df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
+
+        base_selection = (df['mask'] == False) & (df['starmask'] == False)
+
+        if selection['ghostmask_selection'] == 'with ghostmask':
+            base_selection &= df['ghostmask'] == False
+
+        ra_randoms = df.loc[base_selection, self.randoms_ra_col].values
+        dec_randoms = df.loc[base_selection, self.randoms_dec_col].values
+        return ra_randoms, dec_randoms
+
 
 
 class AngularClusteringPlots:
-    def __init__(self, clustering_results):
+    def __init__(self, clustering_results, save_location = None):
         self.clustering_results = clustering_results
+        self.save_location = save_location
 
 
     def plot_correlation_figure(self):
         pass
 
 
-    def _plot_correlation_function(self, ax, clustering_result):
+    def _plot_correlation_function_subplot(self, ax, clustering_result_per_plot):
+        for result in clustering_result_per_plot:
 
-        pass
+            r1 = np.exp(result['meanlogr'])
+            r1_pos_mask = result['xi'] > 0
+            r1 = r1[r1_pos_mask]
+            xi = result['xi'][r1_pos_mask]
+            varxi = result['varxi'][r1_pos_mask]
+
+            ax.plot(r1, xi, label="LABEL PLACEHOLDER", color = colour)
+            ax.errorbar(r1, xi, yerr=np.sqrt(varxi), lw=0.1, ls = '', color = colour)
+        
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel(r'$\theta$ (degrees)')
+        ax.set_ylabel(r'$w(\theta)$')
+        ax.legend()
+        ax.set_xlim(0.01, 10)
+        ax.grid()
