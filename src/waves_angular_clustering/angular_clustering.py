@@ -6,11 +6,6 @@ import json
 import os
 import itertools
 
-# Keys from the selection dict that uniquely determine which randoms are loaded.
-# target_selection / survey_depth / star_gal_method only affect the data catalogue,
-# so RR can be shared across all selections that agree on these two keys.
-_RR_CACHE_KEYS = ('region', 'ghostmask_selection')
-
 
 class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
@@ -54,18 +49,9 @@ class AngularClustering:
             patch_centers=self.data_cat.patch_centers
         )
 
-    def do_correlations(self, precomputed_rr=None):
+    def do_correlations(self):
         """
         Run DD, DR, and RR correlations and compute xi.
-        TODO: Get rid of precomuted stuff, patches makes this not work. 
-
-        Parameters
-        ----------
-        precomputed_rr : treecorr.NNCorrelation or None
-            If supplied, skip the RR processing step and use this object
-            directly. The caller is responsible for ensuring it was computed
-            with identical binning settings and the same randoms catalogue.
-            
         """
         dd = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
@@ -123,10 +109,6 @@ class WavesWideClustering:
         self.randoms_realisation_to_load = [0, 1, 2, 3, 4]
 
         self.results_directory = results_directory
-        # RR correlation files are stored in a sub-directory of results_directory.
-        # They are named by the subset of selection keys that affect the randoms,
-        # so they can be reused across selections that differ only in data-side cuts.
-        self.rr_cache_dir = os.path.join(results_directory, 'rr_cache') if results_directory else None
 
         # Treecorr binning settings — shared by all AngularClustering instances
         # and used when reconstructing an RR object from cache.
@@ -234,84 +216,6 @@ class WavesWideClustering:
             return None, None, None   # handled separately via _load_WWC_*
         else:
             raise ValueError(f"Unknown region: '{region}'")
-
-    # ---------------------------------------------------------------------- #
-    # RR cache helpers
-    # ---------------------------------------------------------------------- #
-
-    @staticmethod
-    def _rr_cache_key(selection):
-        """
-        Return the subset of the selection dict that uniquely identifies
-        which randoms catalogue was used, and therefore which RR file applies.
-        """
-        return {k: selection[k] for k in _RR_CACHE_KEYS if k in selection}
-
-    @staticmethod
-    def _rr_key_to_filename(rr_key):
-        """Convert an RR cache-key dict to a safe filename (FITS format)."""
-        parts = [f"{k}={v}" for k, v in sorted(rr_key.items())]
-        name = "__".join(parts).replace(' ', '_').replace('<', 'lt').replace('/', '-')
-        return f"rr__{name}.fits"
-
-    def _get_rr_cache_path(self, selection):
-        """Full path for the RR FITS file corresponding to this selection."""
-        rr_key = self._rr_cache_key(selection)
-        return os.path.join(self.rr_cache_dir, self._rr_key_to_filename(rr_key))
-
-    def _rr_cache_exists(self, selection):
-        """Return True if a cached RR file exists for this selection's randoms."""
-        return os.path.isfile(self._get_rr_cache_path(selection))
-
-    def _load_rr_from_cache(self, selection):
-        """
-        Load and return a treecorr.NNCorrelation from the RR cache.
-        The correlation config must match; treecorr will raise if it doesn't.
-        """
-        path = self._get_rr_cache_path(selection)
-        print(f"  Loading cached RR from {path}")
-        rr = treecorr.NNCorrelation(
-            min_sep=self.min_sep,
-            max_sep=self.max_sep,
-            nbins=self.nbins,
-            sep_units=self.sep_units,
-        )
-        rr.read(path)
-        return rr
-
-    def _save_rr_to_cache(self, rr, selection):
-        """Write an RR NNCorrelation object to the cache directory as FITS."""
-        os.makedirs(self.rr_cache_dir, exist_ok=True)
-        path = self._get_rr_cache_path(selection)
-        rr.write(path)
-        print(f"  Cached RR saved to {path}")
-
-    def _get_or_compute_rr(self, rand_cat, selection, ac_instance):
-        """
-        Return an RR NNCorrelation, loading from cache if available or
-        computing (and caching) it if not.
-
-        Parameters
-        ----------
-        rand_cat : treecorr.Catalog
-            The randoms catalogue already built by the AngularClustering instance.
-        selection : dict
-        ac_instance : AngularClustering
-            Used to read binning parameters for constructing the RR object.
-        """
-        if self._rr_cache_exists(selection):
-            return self._load_rr_from_cache(selection)
-
-        print(f"  Computing RR for cache key: {self._rr_cache_key(selection)}")
-        rr = treecorr.NNCorrelation(
-            min_sep=ac_instance.min_sep,
-            max_sep=ac_instance.max_sep,
-            nbins=ac_instance.nbins,
-            sep_units=ac_instance.sep_units,
-        )
-        rr.process(rand_cat)
-        self._save_rr_to_cache(rr, selection)
-        return rr
 
     # ---------------------------------------------------------------------- #
     # Data loading
@@ -492,10 +396,8 @@ class WavesWideClustering:
             nbins=self.nbins, sep_units=self.sep_units,
         )
         print("  Computing correlations...")
-        print("  Checking for cached RR...")
-        rr = self._get_or_compute_rr(ac.rand_cat, selection, ac)
-        print("  Computing DD, DR, and xi using RR...")
-        ac.do_correlations(precomputed_rr=rr)
+        print("  Computing DD, DR, RR, and xi...")
+        ac.do_correlations()
         print("  Clustering computation complete.")
         save_path = self._get_results_path(selection)
         print(f"  Saving results to {save_path}...")
