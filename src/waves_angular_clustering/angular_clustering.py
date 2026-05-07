@@ -57,6 +57,7 @@ class AngularClustering:
     def do_correlations(self, precomputed_rr=None):
         """
         Run DD, DR, and RR correlations and compute xi.
+        TODO: Get rid of precomuted stuff, patches makes this not work. 
 
         Parameters
         ----------
@@ -64,11 +65,11 @@ class AngularClustering:
             If supplied, skip the RR processing step and use this object
             directly. The caller is responsible for ensuring it was computed
             with identical binning settings and the same randoms catalogue.
+            
         """
         dd = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
-            var_method=self.var_method
         )
         dr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
@@ -77,14 +78,12 @@ class AngularClustering:
         dd.process(self.data_cat)
         dr.process(self.data_cat, self.rand_cat)
 
-        if precomputed_rr is not None:
-            rr = precomputed_rr
-        else:
-            rr = treecorr.NNCorrelation(
-                min_sep=self.min_sep, max_sep=self.max_sep,
-                nbins=self.nbins, sep_units=self.sep_units
-            )
-            rr.process(self.rand_cat)
+
+        rr = treecorr.NNCorrelation(
+            min_sep=self.min_sep, max_sep=self.max_sep,
+            nbins=self.nbins, sep_units=self.sep_units
+        )
+        rr.process(self.rand_cat)
 
         self.xi, self.varxi = dd.calculateXi(rr=rr, dr=dr)
         self.meanlogr = dd.meanlogr
