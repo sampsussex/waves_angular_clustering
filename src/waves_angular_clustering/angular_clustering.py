@@ -46,7 +46,7 @@ class AngularClustering:
         self.data_cat = treecorr.Catalog(
             ra=self.ra_cat, dec=self.dec_cat,
             ra_units=self.cat_units, dec_units=self.cat_units,
-            npatch=self.n_patch, var_method=self.var_method
+            npatch=self.n_patch
         )
         self.rand_cat = treecorr.Catalog(
             ra=self.ra_rand, dec=self.dec_rand,
@@ -70,10 +70,12 @@ class AngularClustering:
         dd = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
+            var_method=self.var_method
         )
         dr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
-            nbins=self.nbins, sep_units=self.sep_units
+            nbins=self.nbins, sep_units=self.sep_units,
+            var_method=self.var_method
         )
         dd.process(self.data_cat)
         dr.process(self.data_cat, self.rand_cat)
@@ -81,7 +83,8 @@ class AngularClustering:
 
         rr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
-            nbins=self.nbins, sep_units=self.sep_units
+            nbins=self.nbins, sep_units=self.sep_units, 
+            var_method=self.var_method
         )
         rr.process(self.rand_cat)
 
