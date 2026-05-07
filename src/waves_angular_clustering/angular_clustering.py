@@ -316,7 +316,9 @@ class WavesWideClustering:
     # ---------------------------------------------------------------------- #
 
     def _load_dataset(self, photom_filepath, stargal_filepath, selection):
+        print(f"  Loading photometric data from {photom_filepath}...")
         df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
+        print(f"  Loaded {len(df)} rows from photometric catalogue.")
         df['uberID'] = df['uberID'].astype(np.int64)
 
         # ------------------------------------------------------------------ #
@@ -327,8 +329,10 @@ class WavesWideClustering:
         df['stargal'] = np.nan
 
         if selection['star_gal_method'] == 'TOPZ/SFM/R50':
-            df_stargal = pd.read_csv(stargal_filepath, usecols=self.columns_to_load_stargal)
+            print(f"  Loading stargal classification from {stargal_filepath}...")
+            df_stargal = pd.read_parquet(stargal_filepath, columns=self.columns_to_load_stargal)
             df_stargal['uberID'] = df_stargal['uberID'].astype(np.int64)
+            print(f"  Loaded {len(df_stargal)} rows from stargal catalogue.")
             # Merge brings in the external stargal classification
             df = df.merge(df_stargal, on='uberID', how='left', suffixes=('', '_ext'))
             # Use the external column if present, fall back to the initialised NaN
@@ -387,6 +391,7 @@ class WavesWideClustering:
         return ra_data, dec_data
 
     def _load_randoms(self, randoms_filepath, selection):
+        print(f"  Loading randoms from {randoms_filepath} with selection {selection}...")
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
 
         base_selection = (
@@ -408,6 +413,7 @@ class WavesWideClustering:
 
         ra_randoms = df_sel[self.randoms_ra_col].values
         dec_randoms = df_sel[self.randoms_dec_col].values
+        print(f"  Loaded {len(ra_randoms)} random points after selection.")
         return ra_randoms, dec_randoms
 
     def _load_WWC_data(self, selection):
