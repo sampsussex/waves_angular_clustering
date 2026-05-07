@@ -465,13 +465,18 @@ class WavesWideClustering:
 
         region = selection['region']
         if region == 'WW combined':
+            print("  Loading and concatenating north + south data for WW combined region...")
             ra_data, dec_data = self._load_WWC_data(selection)
             ra_rand, dec_rand = self._load_WWC_randoms(selection)
+            print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms for WW combined.")
         else:
+            print("  Loading data and randoms...")
             photom_fp, stargal_fp, randoms_fp = self._get_filepaths_for_selection(selection)
             ra_data, dec_data = self._load_dataset(photom_fp, stargal_fp, selection)
             ra_rand, dec_rand = self._load_randoms(randoms_fp, selection)
+            print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms.")
 
+        print("  Initialising AngularClustering instance...")
         ac = AngularClustering(
             ra_cat=ra_data, dec_cat=dec_data,
             ra_rand=ra_rand, dec_rand=dec_rand,
@@ -479,17 +484,23 @@ class WavesWideClustering:
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
         )
-
+        print("  Computing correlations...")
+        print("  Checking for cached RR...")
         rr = self._get_or_compute_rr(ac.rand_cat, selection, ac)
+        print("  Computing DD, DR, and xi using RR...")
         ac.do_correlations(precomputed_rr=rr)
-
+        print("  Clustering computation complete.")
         save_path = self._get_results_path(selection)
+        print(f"  Saving results to {save_path}...")
         os.makedirs(self.results_directory, exist_ok=True)
         ac.save_results(save_path)
         print(f"  Saved to {save_path}")
 
         results = ac.results
+        print("  Cleaning up treecorr catalogs from memory...")
         ac.clean_up()
+        print("  Done.")
+        print("-" * 50)
         return results
 
     def get_clustering_for_all_selections_to_run(self):
