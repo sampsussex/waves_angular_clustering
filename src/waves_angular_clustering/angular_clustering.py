@@ -148,7 +148,7 @@ class WavesWideClustering:
         # missing from the original columns list.
         self.columns_to_load_randoms = [
             self.randoms_ra_col, self.randoms_dec_col,
-            'in_region', 'starmask', 'ghostmask', 'polygon_mask', 'realisation'
+            'starmask', 'ghostmask', 'polygon_mask', 'realisation'
         ]
 
         # ------------------------------------------------------------------ #
@@ -395,7 +395,6 @@ class WavesWideClustering:
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
 
         base_selection = (
-            (df['in_region'] == True) &
             (df['starmask'] == False) &
             (df['polygon_mask'] == False) &
             (df['realisation'].isin(self.randoms_realisation_to_load))
