@@ -11,7 +11,7 @@ class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
                  min_sep=0.01, max_sep=10, nbins=100, sep_units='degrees',
                  cat_units='degrees', rand_units='degrees',
-                 n_patch=10, var_method='jackknife'):
+                 n_patch=20, var_method='jackknife'):
         self.ra_cat = ra_cat
         self.dec_cat = dec_cat
         self.ra_rand = ra_rand
@@ -117,8 +117,8 @@ class WavesWideClustering:
         self.nbins     = 100
         self.sep_units = 'degrees'
 
-        self.data_ra_col = 'RAGAIA'
-        self.data_dec_col = 'DecGAIA'
+        self.data_ra_col = 'RAmax'
+        self.data_dec_col = 'Decmax'
         self.randoms_ra_col = 'ra'
         self.randoms_dec_col = 'dec'
 
@@ -513,7 +513,7 @@ def _build_panel_title(panel_results: list) -> tuple[str, set]:
 
 
 class AngularClusteringPlots:
-    def __init__(self, clustering_results, num_panels, save_location=None):
+    def __init__(self, clustering_results, num_panels, save_location=None, log_scale=True):
         """
         Parameters
         ----------
@@ -524,10 +524,13 @@ class AngularClusteringPlots:
             Number of subplot panels to create.
         save_location : str or None
             If given, the figure is saved here instead of shown.
+        log_scale : bool
+            Whether to use a logarithmic scale for the x and y-axis.
         """
         self.clustering_results = clustering_results
         self.save_location = save_location
         self.num_panels = num_panels
+        self.log_scale = log_scale
 
         # selections_per_panel maps panel index -> list of result dicts to plot.
         # Populated via assign_results_to_panel().
@@ -649,10 +652,13 @@ class AngularClusteringPlots:
             label     = _label_for(sel, title_value_set)
 
             # Only plot positive xi values on a log-log scale
-            pos_mask = xi > 0
-            if not np.any(pos_mask):
-                print(f"  Warning: no positive xi values for selection {sel}. Skipping.")
-                continue
+            if self.log_scale:
+                pos_mask = xi > 0
+                if not np.any(pos_mask):
+                    print(f"  Warning: no positive xi values for selection {sel}. Skipping.")
+                    continue
+            else:                
+                pos_mask = np.ones_like(xi, dtype=bool)
 
             ax.plot(
                 r[pos_mask], xi[pos_mask],
@@ -665,13 +671,15 @@ class AngularClusteringPlots:
                 yerr=np.sqrt(varxi[pos_mask]),
                 lw=1.5, alpha = 0.25, ls='', color=colour,
             )
-
-        ax.set_xscale('log')
-        ax.set_yscale('log')
+        if self.log_scale:
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            ax.set_xlim(0.01, 10)
+        else:
+            ax.set_xlim(0.1, 3)
         ax.set_xlabel(r'$\theta$ [degrees]')
         ax.set_ylabel(r'$w(\theta)$')
         ax.legend(fontsize=7)
-        ax.set_xlim(0.01, 10)
         ax.grid()
 
         if panel_title:
