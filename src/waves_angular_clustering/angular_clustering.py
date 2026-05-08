@@ -241,6 +241,7 @@ class WavesWideClustering:
             print(f"  Loaded {len(df_stargal)} rows from stargal catalogue.")
             # Merge brings in the external stargal classification
             df = df.merge(df_stargal, on='uberID', how='left', suffixes=('', '_ext'))
+            del df_stargal
             # Use the external column if present, fall back to the initialised NaN
             if 'stargal_ext' in df.columns:
                 df['stargal'] = df['stargal_ext']
@@ -278,15 +279,18 @@ class WavesWideClustering:
         elif depth == 'Z<22':
             base_selection &= df['mag_Zt'] < 22
 
-        df_sel = df.loc[base_selection]
+        df_sel = df.loc[base_selection].copy()
+        del base_selection
+        del df  # free memory
 
         if len(df_sel) == 0:
             raise ValueError(
                 f"Dataset is empty after applying selection: {selection}"
             )
 
-        ra_data = df_sel[self.data_ra_col].values
-        dec_data = df_sel[self.data_dec_col].values
+        ra_data = df_sel[self.data_ra_col].to_numpy(copy=True)
+        dec_data = df_sel[self.data_dec_col].to_numpy(copy=True)
+        del df_sel  # free memory
 
         if np.any(np.isnan(ra_data)) or np.any(np.isnan(dec_data)):
             raise ValueError(
@@ -309,16 +313,17 @@ class WavesWideClustering:
         if selection['ghostmask_selection'] == 'with ghostmask':
             base_selection &= df['ghostmask'] == False
 
-        df_sel = df.loc[base_selection]
-
+        df_sel = df.loc[base_selection].copy()
+        del df
         if len(df_sel) == 0:
             raise ValueError(
                 f"Randoms catalogue is empty after applying selection: {selection}"
             )
 
-        ra_randoms = df_sel[self.randoms_ra_col].values
-        dec_randoms = df_sel[self.randoms_dec_col].values
+        ra_randoms = df_sel[self.randoms_ra_col].to_numpy(copy=True)
+        dec_randoms = df_sel[self.randoms_dec_col].to_numpy(copy=True)
         print(f"  Loaded {len(ra_randoms)} random points after selection.")
+        del df_sel  # free memory
         return ra_randoms, dec_randoms
 
     def _load_WWC_data(self, selection):
@@ -408,6 +413,8 @@ class WavesWideClustering:
         results = ac.results
         print("  Cleaning up treecorr catalogs from memory...")
         ac.clean_up()
+        del ac  # free memory
+        del ra_data, dec_data, ra_rand, dec_rand  # free memory
         print("  Done.")
         print("-" * 50)
         return results
