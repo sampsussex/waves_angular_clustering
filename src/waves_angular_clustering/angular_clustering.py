@@ -434,8 +434,75 @@ class WavesWideClustering:
 # Plotting
 # --------------------------------------------------------------------------- #
 
-# Default colour cycle used when no colour is specified per panel entry
-_DEFAULT_COLOURS = plt.rcParams['axes.prop_cycle'].by_key()['color']
+# Colour keyed on target_selection value
+_COLOUR_BY_TARGET = {
+    'star':               'red',
+    'galaxy':             'blue',
+    'galaxy/ambiguous':   'green',
+}
+_DEFAULT_COLOUR = 'grey'   # fallback for unrecognised target_selection values
+
+# Line style keyed on star_gal_method value
+_LINESTYLE_BY_METHOD = {
+    'TOPZ/SFM/R50': '-',    # solid
+    'baseline':     '--',   # dashed
+    'UMAP':         ':',    # double-dashed (dotted)
+}
+_DEFAULT_LINESTYLE = '-'    # fallback
+
+
+def _colour_for(selection: dict) -> str:
+    target = selection.get('target_selection', '')
+    return _COLOUR_BY_TARGET.get(target, _DEFAULT_COLOUR)
+
+
+def _linestyle_for(selection: dict) -> str:
+    method = selection.get('star_gal_method', '')
+    return _LINESTYLE_BY_METHOD.get(method, _DEFAULT_LINESTYLE)
+
+
+def _label_for(selection: dict, title_keys: set) -> str:
+    """
+    Build a legend label from *selection*, omitting:
+      - keys whose value appears in title_keys (already shown in the panel title)
+      - keys whose value is None
+
+    Only the VALUES are shown (no 'key=' prefix).
+    """
+    parts = [
+        str(v)
+        for k, v in selection.items()
+        if v is not None and str(v) not in title_keys
+    ]
+    return ', '.join(parts) if parts else 'default'
+
+
+def _build_panel_title(panel_results: list) -> tuple[str, set]:
+    """
+    For a list of result dicts sharing a panel, identify which keys have only a
+    single unique value across all results.  Those values go into the panel
+    title (as bare values, no key names).  Returns (title_string, title_value_set).
+    """
+    if not panel_results:
+        return '', set()
+
+    # Collect all unique values per key across every result on this panel
+    from collections import defaultdict
+    values_per_key = defaultdict(set)
+    for r in panel_results:
+        for k, v in r.get('selection', {}).items():
+            if v is not None:
+                values_per_key[k].add(str(v))
+
+    # Keys with exactly one unique value → go in the title
+    title_parts = [
+        next(iter(vals))
+        for vals in values_per_key.values()
+        if len(vals) == 1
+    ]
+    title_value_set = set(title_parts)
+    title = ', '.join(title_parts)
+    return title, title_value_set
 
 
 class AngularClusteringPlots:
@@ -461,23 +528,49 @@ class AngularClusteringPlots:
 
     def assign_results_to_panel(self, panel_index, selection_filters):
         """
-        Assign clustering results matching all key/value pairs in
+        Assign clustering results matching *all* key/value pairs in
         selection_filters to a specific panel.
+
+        Each value in selection_filters may be either:
+          - a single value   e.g. 'no ghostmask'
+          - a list of values e.g. ['galaxy', 'galaxy/ambiguous', 'star']
+
+        A result matches a key if its selection[key] is equal to the scalar
+        value, or is contained in the list of values.
 
         Parameters
         ----------
         panel_index : int
         selection_filters : dict
-            e.g. {'region': 'WWN', 'survey_depth': 'Z<21.1'}
+            e.g. {
+                'target_selection':    ['galaxy', 'star'],
+                'survey_depth':        ['Z<21.1'],
+                'ghostmask_selection': 'no ghostmask',
+            }
         """
         if panel_index not in self.selections_per_panel:
-            raise ValueError(f"panel_index {panel_index} out of range (0..{self.num_panels-1})")
+            raise ValueError(
+                f"panel_index {panel_index} out of range (0..{self.num_panels - 1})"
+            )
+
+        def _matches(result_selection, filters):
+            for k, allowed in filters.items():
+                val = result_selection.get(k)
+                if isinstance(allowed, list):
+                    if val not in allowed:
+                        return False
+                else:
+                    if val != allowed:
+                        return False
+            return True
 
         matched = [
             r for r in self.clustering_results
-            if all(r['selection'].get(k) == v for k, v in selection_filters.items())
+            if _matches(r.get('selection', {}), selection_filters)
         ]
         self.selections_per_panel[panel_index].extend(matched)
+
+    # ---------------------------------------------------------------------- #
 
     def plot_correlation_figure(self, ncols=None, figsize=None):
         """
@@ -531,18 +624,22 @@ class AngularClusteringPlots:
             Each dict has keys 'selection' and 'columns'
             (with sub-keys 'xi', 'varxi', 'meanlogr').
         """
-        for idx, result in enumerate(clustering_result_per_plot):
-            columns = result['columns']
-            xi      = np.array(columns['xi'])
-            varxi   = np.array(columns['varxi'])
+        # Work out which values are shared across all results on this panel so
+        # they can be shown in the title rather than repeated in every label.
+        panel_title, title_value_set = _build_panel_title(clustering_result_per_plot)
+
+        for result in clustering_result_per_plot:
+            columns  = result['columns']
+            xi       = np.array(columns['xi'])
+            varxi    = np.array(columns['varxi'])
             meanlogr = np.array(columns['meanlogr'])
 
-            r = np.exp(meanlogr)
-            colour = _DEFAULT_COLOURS[idx % len(_DEFAULT_COLOURS)]
-
-            # Build a human-readable label from the selection dict
+            r   = np.exp(meanlogr)
             sel = result.get('selection', {})
-            label = ', '.join(f"{k}={v}" for k, v in sel.items())
+
+            colour    = _colour_for(sel)
+            linestyle = _linestyle_for(sel)
+            label     = _label_for(sel, title_value_set)
 
             # Only plot positive xi values on a log-log scale
             pos_mask = xi > 0
@@ -550,17 +647,25 @@ class AngularClusteringPlots:
                 print(f"  Warning: no positive xi values for selection {sel}. Skipping.")
                 continue
 
-            ax.plot(r[pos_mask], xi[pos_mask], label=label, color=colour)
+            ax.plot(
+                r[pos_mask], xi[pos_mask],
+                label=label,
+                color=colour,
+                linestyle=linestyle,
+            )
             ax.errorbar(
                 r[pos_mask], xi[pos_mask],
                 yerr=np.sqrt(varxi[pos_mask]),
-                lw=0.1, ls='', color=colour
+                lw=1.5, alpha = 0.25, ls='', color=colour,
             )
 
         ax.set_xscale('log')
         ax.set_yscale('log')
-        ax.set_xlabel(r'$\theta$ (degrees)')
+        ax.set_xlabel(r'$\theta$ [degrees]')
         ax.set_ylabel(r'$w(\theta)$')
         ax.legend(fontsize=7)
         ax.set_xlim(0.01, 10)
-        ax.grid(True, which='both', ls='--', alpha=0.4)
+        ax.grid()
+
+        if panel_title:
+            ax.set_title(panel_title, fontsize=8)
