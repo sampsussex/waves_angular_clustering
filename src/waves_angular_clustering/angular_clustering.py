@@ -165,7 +165,7 @@ class WavesWideClustering:
 
         self.extra_rec_masks = [
             [[165.9, 165.95], [-3.95, -3.7]], # in north, ramin, ramax, decmin, decmax
-            [[210.20, 210.30], [2.85, 2.90]] # in north, ramin, ramax, decmin, decmax
+            [[210.20, 210.30], [2.85, 2.90]], # in north, ramin, ramax, decmin, decmax
             [[351.55, 351.65], [-32.45, -32.35]], # in south, ramin, ramax, decmin, decmax
             [[356.90, 356.95], [-28.15, -28.10]] # in south, ramin, ramax, decmin, decmax
         ]
