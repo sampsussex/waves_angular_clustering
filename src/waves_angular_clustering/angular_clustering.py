@@ -463,6 +463,28 @@ class WavesWideClustering:
         print(f"  randoms: N={len(ra_rand)}, RA=({ra_rand.min():.3f}, {ra_rand.max():.3f}), Dec=({dec_rand.min():.3f}, {dec_rand.max():.3f})")
         print(f"  random/data ratio = {len(ra_rand)/len(ra_data):.2f}")
 
+    def _get_diagnostics_directory(self):
+        diag_dir = os.path.join(self.results_directory, "diagnostics")
+        os.makedirs(diag_dir, exist_ok=True)
+        return diag_dir
+
+
+    def _get_diagnostic_plot_path(self, selection, plot_type):
+        """
+        plot_type examples:
+            'hist1d'
+            'density2d'
+        """
+        base = self._selection_to_filename(selection)
+        base = base.replace(".json", "")
+
+        filename = f"{base}__{plot_type}.png"
+
+        return os.path.join(
+            self._get_diagnostics_directory(),
+            filename
+        )
+
     def plot_ra_dec_histograms(
         self,
         ra_data,
