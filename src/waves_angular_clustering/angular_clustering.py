@@ -392,6 +392,27 @@ class WavesWideClustering:
             ra_rand, dec_rand = self._load_randoms(randoms_fp, selection)
             print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms.")
 
+        self._diagnose_catalog("Data and Randoms", ra_data, dec_data, ra_rand, dec_rand)
+
+        print("  Generating diagnostic plots...")
+        self.plot_ra_dec_histograms(
+            ra_data,
+            dec_data,
+            ra_rand,
+            dec_rand,
+            selection,
+        )
+        print("  Saved RA/Dec histogram diagnostics.")
+        print("  Generating RA/Dec density diagnostic...")
+        self.plot_ra_dec_density(
+            ra_data,
+            dec_data,
+            ra_rand,
+            dec_rand,
+            selection,
+        )
+
+        print("  Initial diagnostics complete.")
         print("  Initialising AngularClustering instance...")
         ac = AngularClustering(
             ra_cat=ra_data, dec_cat=dec_data,
@@ -435,6 +456,211 @@ class WavesWideClustering:
                 print(f"  ERROR for selection {selection}: {e}")
 
         return all_results
+    
+    def _diagnose_catalog(self, name, ra_data, dec_data, ra_rand, dec_rand):
+        print(f"\n{name} diagnostics")
+        print(f"  data:    N={len(ra_data)}, RA=({ra_data.min():.3f}, {ra_data.max():.3f}), Dec=({dec_data.min():.3f}, {dec_data.max():.3f})")
+        print(f"  randoms: N={len(ra_rand)}, RA=({ra_rand.min():.3f}, {ra_rand.max():.3f}), Dec=({dec_rand.min():.3f}, {dec_rand.max():.3f})")
+        print(f"  random/data ratio = {len(ra_rand)/len(ra_data):.2f}")
+
+    def plot_ra_dec_histograms(
+        self,
+        ra_data,
+        dec_data,
+        ra_rand,
+        dec_rand,
+        selection,
+        bins=100,
+        normalise=True,
+    ):
+        """
+        Save-only 1D RA/Dec histogram comparison.
+        """
+
+        save_path = self._get_diagnostic_plot_path(
+            selection,
+            "hist1d"
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        density = normalise
+
+        # --------------------------------------------------
+        # RA histogram
+        # --------------------------------------------------
+        axes[0].hist(
+            ra_data,
+            bins=bins,
+            histtype='step',
+            linewidth=2,
+            density=density,
+            label='Data'
+        )
+
+        axes[0].hist(
+            ra_rand,
+            bins=bins,
+            histtype='step',
+            linewidth=2,
+            density=density,
+            label='Randoms'
+        )
+
+        axes[0].set_xlabel('RA [deg]')
+        axes[0].set_ylabel('Density' if density else 'Counts')
+        axes[0].set_title('RA distribution')
+        axes[0].legend()
+        axes[0].grid(alpha=0.3)
+
+        # --------------------------------------------------
+        # Dec histogram
+        # --------------------------------------------------
+        axes[1].hist(
+            dec_data,
+            bins=bins,
+            histtype='step',
+            linewidth=2,
+            density=density,
+            label='Data'
+        )
+
+        axes[1].hist(
+            dec_rand,
+            bins=bins,
+            histtype='step',
+            linewidth=2,
+            density=density,
+            label='Randoms'
+        )
+
+        axes[1].set_xlabel('Dec [deg]')
+        axes[1].set_ylabel('Density' if density else 'Counts')
+        axes[1].set_title('Dec distribution')
+        axes[1].legend()
+        axes[1].grid(alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+
+        print(f"  Saved histogram diagnostic to {save_path}")
+
+    def plot_ra_dec_density(
+        self,
+        ra_data,
+        dec_data,
+        ra_rand,
+        dec_rand,
+        selection,
+        bins=200,
+    ):
+        """
+        Save-only 2D density diagnostic.
+        """
+
+        save_path = self._get_diagnostic_plot_path(
+            selection,
+            "density2d"
+        )
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+        # --------------------------------------------------
+        # Data density
+        # --------------------------------------------------
+        h1 = axes[0, 0].hist2d(
+            ra_data,
+            dec_data,
+            bins=bins,
+        )
+
+        axes[0, 0].set_title('Data')
+        axes[0, 0].set_xlabel('RA [deg]')
+        axes[0, 0].set_ylabel('Dec [deg]')
+        fig.colorbar(h1[3], ax=axes[0, 0])
+
+        # --------------------------------------------------
+        # Random density
+        # --------------------------------------------------
+        h2 = axes[0, 1].hist2d(
+            ra_rand,
+            dec_rand,
+            bins=bins,
+        )
+
+        axes[0, 1].set_title('Randoms')
+        axes[0, 1].set_xlabel('RA [deg]')
+        axes[0, 1].set_ylabel('Dec [deg]')
+        fig.colorbar(h2[3], ax=axes[0, 1])
+
+        # --------------------------------------------------
+        # Difference map
+        # --------------------------------------------------
+        data_hist, xedges, yedges = np.histogram2d(
+            ra_data,
+            dec_data,
+            bins=bins
+        )
+
+        rand_hist, _, _ = np.histogram2d(
+            ra_rand,
+            dec_rand,
+            bins=[xedges, yedges]
+        )
+
+        data_hist /= np.sum(data_hist)
+        rand_hist /= np.sum(rand_hist)
+
+        diff = data_hist - rand_hist
+
+        im = axes[1, 0].imshow(
+            diff.T,
+            origin='lower',
+            aspect='auto',
+            extent=[
+                xedges[0], xedges[-1],
+                yedges[0], yedges[-1]
+            ],
+        )
+
+        axes[1, 0].set_title('Data - Randoms')
+        axes[1, 0].set_xlabel('RA [deg]')
+        axes[1, 0].set_ylabel('Dec [deg]')
+        fig.colorbar(im, ax=axes[1, 0])
+
+        # --------------------------------------------------
+        # Scatter comparison
+        # --------------------------------------------------
+        step_data = max(1, len(ra_data) // 50000)
+        step_rand = max(1, len(ra_rand) // 50000)
+
+        axes[1, 1].scatter(
+            ra_rand[::step_rand],
+            dec_rand[::step_rand],
+            s=1,
+            alpha=0.3,
+            label='Randoms'
+        )
+
+        axes[1, 1].scatter(
+            ra_data[::step_data],
+            dec_data[::step_data],
+            s=1,
+            alpha=0.3,
+            label='Data'
+        )
+
+        axes[1, 1].set_title('Scatter comparison')
+        axes[1, 1].set_xlabel('RA [deg]')
+        axes[1, 1].set_ylabel('Dec [deg]')
+        axes[1, 1].legend()
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+
+        print(f"  Saved density diagnostic to {save_path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -598,7 +824,7 @@ class AngularClusteringPlots:
         nrows = int(np.ceil(self.num_panels / ncols))
         figsize = figsize or (5 * ncols, 4 * nrows)
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=True, sharey=True, constrained_layout=True)
         axes_flat = axes.flatten()
 
         for panel_idx in range(self.num_panels):
@@ -613,7 +839,20 @@ class AngularClusteringPlots:
         for ax in axes_flat[self.num_panels:]:
             ax.set_visible(False)
 
-        plt.tight_layout()
+        for i, ax in enumerate(axes_flat[:self.num_panels]):
+            if not ax.get_visible():
+                continue
+            row = i // ncols
+            col = i % ncols
+
+            if col == 0:
+                ax.set_ylabel(r'$w(\theta)$')
+
+            # Label x-axis if there's no visible panel directly below
+            next_row_idx = i + ncols
+            bottom_edge = (next_row_idx >= self.num_panels)
+            if bottom_edge:
+                ax.set_xlabel(r'$\theta$ [degrees]')
 
         if self.save_location:
             fig.savefig(self.save_location, dpi=150, bbox_inches='tight')
@@ -677,8 +916,8 @@ class AngularClusteringPlots:
             ax.set_xlim(0.01, 10)
         else:
             ax.set_xlim(0.1, 3)
-        ax.set_xlabel(r'$\theta$ [degrees]')
-        ax.set_ylabel(r'$w(\theta)$')
+        #ax.set_xlabel(r'$\theta$ [degrees]')
+        #ax.set_ylabel(r'$w(\theta)$')
         ax.legend(fontsize=7)
         ax.grid()
 
