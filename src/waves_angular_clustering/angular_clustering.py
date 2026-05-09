@@ -638,44 +638,73 @@ class WavesWideClustering:
         """
         Save-only 2D density diagnostic.
         """
-
         save_path = self._get_diagnostic_plot_path(
             selection,
             "density2d"
         )
-
         ra_data_plot = self._wrap_ra_for_region(ra_data, selection)
         ra_rand_plot = self._wrap_ra_for_region(ra_rand, selection)
 
-        fig, axes = plt.subplots(2, 2, figsize=(30, 12))
+        # --------------------------------------------------
+        # Derive true data extents from combined data + randoms
+        # --------------------------------------------------
+        ra_all  = np.concatenate([ra_data_plot, ra_rand_plot])
+        dec_all = np.concatenate([dec_data,     dec_rand])
+
+        ra_min,  ra_max  = ra_all.min(),  ra_all.max()
+        dec_min, dec_max = dec_all.min(), dec_all.max()
+
+        ra_range  = ra_max  - ra_min   # full RA  span in degrees
+        dec_range = dec_max - dec_min  # full Dec span in degrees
+
+        # Equal angular bin size: choose one bin width in degrees that applies
+        # to both axes, then derive the number of bins on each axis.
+        bin_deg   = ra_range / bins          # bin size driven by the longer axis
+        n_ra_bins = bins                     # exactly `bins` cells along RA
+        n_dec_bins = max(1, int(np.round(dec_range / bin_deg)))  # matched cell size
+
+        x_bins = np.linspace(ra_min,  ra_max,  n_ra_bins  + 1)
+        y_bins = np.linspace(dec_min, dec_max, n_dec_bins + 1)
+
+        # --------------------------------------------------
+        # Figure sizing: one pixel of figure space per bin cell,
+        # scaled up so the shorter axis stays legible.
+        # --------------------------------------------------
+        aspect_ratio = n_ra_bins / n_dec_bins   # e.g. ~69 if RA≈8×Dec
+
+        min_panel_height = 4.0          # inches — floor so Dec detail is visible
+        panel_height = max(min_panel_height, 18.0 / aspect_ratio)
+        panel_width  = panel_height * aspect_ratio
+
+        fig, axes = plt.subplots(3, 1, figsize=(panel_width, panel_height * 3))
 
         # --------------------------------------------------
         # Data density
         # --------------------------------------------------
-        h1 = axes[0, 0].hist2d(
+        h1 = axes[0].hist2d(
             ra_data_plot,
             dec_data,
-            bins=bins,
+            bins=[x_bins, y_bins],
         )
-
-        axes[0, 0].set_title('Data')
-        axes[0, 0].set_xlabel('RA [deg]')
-        axes[0, 0].set_ylabel('Dec [deg]')
-        fig.colorbar(h1[3], ax=axes[0, 0])
+        axes[0].set_aspect('equal')
+        axes[0].set_title('Data')
+        axes[0].set_xlabel('RA [deg]')
+        axes[0].set_ylabel('Dec [deg]')
+        fig.colorbar(h1[3], ax=axes[0])
 
         # --------------------------------------------------
         # Random density
         # --------------------------------------------------
-        h2 = axes[0, 1].hist2d(
+        h2 = axes[1].hist2d(
             ra_rand_plot,
             dec_rand,
-            bins=bins,
+            bins=[x_bins, y_bins],
         )
-
-        axes[0, 1].set_title('Randoms')
-        axes[0, 1].set_xlabel('RA [deg]')
-        axes[0, 1].set_ylabel('Dec [deg]')
-        fig.colorbar(h2[3], ax=axes[0, 1])
+        axes[1].set_aspect('equal')
+        axes[1].set_title('Randoms')
+        axes[1].set_xlabel('RA [deg]')
+        axes[1].set_ylabel('Dec [deg]')
+        fig.colorbar(h2[3], ax=axes[1])
 
         # --------------------------------------------------
         # Difference map
@@ -683,9 +712,8 @@ class WavesWideClustering:
         data_hist, xedges, yedges = np.histogram2d(
             ra_data_plot,
             dec_data,
-            bins=bins
+            bins=[x_bins, y_bins]
         )
-
         rand_hist, _, _ = np.histogram2d(
             ra_rand_plot,
             dec_rand,
@@ -694,61 +722,29 @@ class WavesWideClustering:
 
         data_sum = np.sum(data_hist)
         rand_sum = np.sum(rand_hist)
-
         if data_sum > 0:
             data_hist = data_hist / data_sum
-
         if rand_sum > 0:
             rand_hist = rand_hist / rand_sum
 
         diff = data_hist - rand_hist
-
-        im = axes[1, 0].imshow(
+        im = axes[2].imshow(
             diff.T,
             origin='lower',
-            aspect='auto',
+            aspect='equal',
             extent=[
                 xedges[0], xedges[-1],
                 yedges[0], yedges[-1]
             ],
         )
-
-        axes[1, 0].set_title('Data - Randoms')
-        axes[1, 0].set_xlabel('RA [deg]')
-        axes[1, 0].set_ylabel('Dec [deg]')
-        fig.colorbar(im, ax=axes[1, 0])
-
-        # --------------------------------------------------
-        # Scatter comparison
-        # --------------------------------------------------
-        step_data = max(1, len(ra_data_plot) // 50000)
-        step_rand = max(1, len(ra_rand_plot) // 50000)
-
-        axes[1, 1].scatter(
-            ra_rand_plot[::step_rand],
-            dec_rand[::step_rand],
-            s=1,
-            alpha=0.3,
-            label='Randoms'
-        )
-
-        axes[1, 1].scatter(
-            ra_data_plot[::step_data],
-            dec_data[::step_data],
-            s=1,
-            alpha=0.3,
-            label='Data'
-        )
-
-        axes[1, 1].set_title('Scatter comparison')
-        axes[1, 1].set_xlabel('RA [deg]')
-        axes[1, 1].set_ylabel('Dec [deg]')
-        axes[1, 1].legend()
+        axes[2].set_title('Data - Randoms')
+        axes[2].set_xlabel('RA [deg]')
+        axes[2].set_ylabel('Dec [deg]')
+        fig.colorbar(im, ax=axes[2])
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
-
         print(f"  Saved density diagnostic to {save_path}")
 
 # --------------------------------------------------------------------------- #
