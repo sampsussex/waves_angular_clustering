@@ -7,6 +7,7 @@ import os
 import itertools
 
 
+
 class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
                  min_sep=0.01, max_sep=10, nbins=100, sep_units='degrees',
@@ -162,6 +163,10 @@ class WavesWideClustering:
         # one per combination (Cartesian product).
         self.selections_to_run = self._expand_selections(selections_to_run)
 
+        self.extra_rec_masks = [
+            [[165.9, 165.95], [-3.95, -3.7]] # in north, ramin, ramax, decmin, decmax
+        ]
+
     # ---------------------------------------------------------------------- #
     # Private helpers
     # ---------------------------------------------------------------------- #
@@ -221,6 +226,22 @@ class WavesWideClustering:
     # Data loading
     # ---------------------------------------------------------------------- #
 
+    def _get_extra_rec_masks(self, ra, dec):
+        """Return boolean mask excluding regions in self.extra_rec_masks."""
+        
+        if not self.extra_rec_masks:
+            return np.ones(len(ra), dtype=bool)
+
+        mask = np.ones(len(ra), dtype=bool)
+
+        for (ramin, ramax), (decmin, decmax) in self.extra_rec_masks:
+            mask &= ~(
+                (ra >= ramin) & (ra <= ramax) &
+                (dec >= decmin) & (dec <= decmax)
+            )
+
+        return mask
+
     def _load_dataset(self, photom_filepath, stargal_filepath, selection):
         print(f"  Loading photometric data from {photom_filepath}...")
         df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
@@ -259,6 +280,9 @@ class WavesWideClustering:
             (df['mask'] == False) &
             (df['starmask'] == False)
         )
+        extra_rec_masks = self._get_extra_rec_masks(df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy())
+
+        base_selection &= extra_rec_masks
 
         target = selection['target_selection']
         if target == 'galaxy':
@@ -309,6 +333,9 @@ class WavesWideClustering:
             (df['polygon_mask'] == False) &
             (df['realisation'].isin(self.randoms_realisation_to_load))
         )
+
+        extra_rec_masks = self._get_extra_rec_masks(df[self.randoms_ra_col].to_numpy(), df[self.randoms_dec_col].to_numpy())
+        base_selection &= extra_rec_masks
 
         if selection['ghostmask_selection'] == 'with ghostmask':
             base_selection &= df['ghostmask'] == False
@@ -485,6 +512,24 @@ class WavesWideClustering:
             filename
         )
 
+
+    def _wrap_ra_for_region(self, ra, selection):
+        """
+        For WWS, wrap RA values > 180 deg into negative RA values.
+
+        Example:
+            359 -> -1
+            270 -> -90
+            181 -> -179
+        """
+        ra = np.asarray(ra).copy()
+
+        if selection.get("region") == "WWS":
+            ra[ra > 180] -= 360
+
+        return ra
+
+
     def plot_ra_dec_histograms(
         self,
         ra_data,
@@ -504,7 +549,10 @@ class WavesWideClustering:
             "hist1d"
         )
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        ra_data_plot = self._wrap_ra_for_region(ra_data, selection)
+        ra_rand_plot = self._wrap_ra_for_region(ra_rand, selection)
+
+        fig, axes = plt.subplots(1, 2, figsize=(5, 5))
 
         density = normalise
 
@@ -512,7 +560,7 @@ class WavesWideClustering:
         # RA histogram
         # --------------------------------------------------
         axes[0].hist(
-            ra_data,
+            ra_data_plot,
             bins=bins,
             histtype='step',
             linewidth=2,
@@ -521,7 +569,7 @@ class WavesWideClustering:
         )
 
         axes[0].hist(
-            ra_rand,
+            ra_rand_plot,
             bins=bins,
             histtype='step',
             linewidth=2,
@@ -568,6 +616,7 @@ class WavesWideClustering:
 
         print(f"  Saved histogram diagnostic to {save_path}")
 
+
     def plot_ra_dec_density(
         self,
         ra_data,
@@ -586,13 +635,16 @@ class WavesWideClustering:
             "density2d"
         )
 
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        ra_data_plot = self._wrap_ra_for_region(ra_data, selection)
+        ra_rand_plot = self._wrap_ra_for_region(ra_rand, selection)
+
+        fig, axes = plt.subplots(2, 2, figsize=(30, 12))
 
         # --------------------------------------------------
         # Data density
         # --------------------------------------------------
         h1 = axes[0, 0].hist2d(
-            ra_data,
+            ra_data_plot,
             dec_data,
             bins=bins,
         )
@@ -606,7 +658,7 @@ class WavesWideClustering:
         # Random density
         # --------------------------------------------------
         h2 = axes[0, 1].hist2d(
-            ra_rand,
+            ra_rand_plot,
             dec_rand,
             bins=bins,
         )
@@ -620,19 +672,25 @@ class WavesWideClustering:
         # Difference map
         # --------------------------------------------------
         data_hist, xedges, yedges = np.histogram2d(
-            ra_data,
+            ra_data_plot,
             dec_data,
             bins=bins
         )
 
         rand_hist, _, _ = np.histogram2d(
-            ra_rand,
+            ra_rand_plot,
             dec_rand,
             bins=[xedges, yedges]
         )
 
-        data_hist /= np.sum(data_hist)
-        rand_hist /= np.sum(rand_hist)
+        data_sum = np.sum(data_hist)
+        rand_sum = np.sum(rand_hist)
+
+        if data_sum > 0:
+            data_hist = data_hist / data_sum
+
+        if rand_sum > 0:
+            rand_hist = rand_hist / rand_sum
 
         diff = data_hist - rand_hist
 
@@ -654,11 +712,11 @@ class WavesWideClustering:
         # --------------------------------------------------
         # Scatter comparison
         # --------------------------------------------------
-        step_data = max(1, len(ra_data) // 50000)
-        step_rand = max(1, len(ra_rand) // 50000)
+        step_data = max(1, len(ra_data_plot) // 50000)
+        step_rand = max(1, len(ra_rand_plot) // 50000)
 
         axes[1, 1].scatter(
-            ra_rand[::step_rand],
+            ra_rand_plot[::step_rand],
             dec_rand[::step_rand],
             s=1,
             alpha=0.3,
@@ -666,7 +724,7 @@ class WavesWideClustering:
         )
 
         axes[1, 1].scatter(
-            ra_data[::step_data],
+            ra_data_plot[::step_data],
             dec_data[::step_data],
             s=1,
             alpha=0.3,
@@ -683,7 +741,6 @@ class WavesWideClustering:
         plt.close(fig)
 
         print(f"  Saved density diagnostic to {save_path}")
-
 
 # --------------------------------------------------------------------------- #
 # Plotting
