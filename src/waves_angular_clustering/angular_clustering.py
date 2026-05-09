@@ -115,7 +115,7 @@ class WavesWideClustering:
         # and used when reconstructing an RR object from cache.
         self.min_sep   = 0.01
         self.max_sep   = 10
-        self.nbins     = 100
+        self.nbins     = 30
         self.sep_units = 'degrees'
 
         self.data_ra_col = 'RAmax'
@@ -150,9 +150,9 @@ class WavesWideClustering:
         }
 
         selections_to_run = {
-            'target_selection':   ['galaxy'],#, 'galaxy/ambiguous', 'star'],
+            'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star'],
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
-            'survey_depth':       ['Z<21.1'],#, 'Z<21.25', 'Z<22'],
+            'survey_depth':       ['Z<21.1', 'Z<21.25', 'Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
             'region':             ['WWN', 'WWS'],
         }
@@ -164,8 +164,17 @@ class WavesWideClustering:
         self.selections_to_run = self._expand_selections(selections_to_run)
 
         self.extra_rec_masks = [
-            [[165.9, 165.95], [-3.95, -3.7]] # in north, ramin, ramax, decmin, decmax
+            [[165.9, 165.95], [-3.95, -3.7]], # in north, ramin, ramax, decmin, decmax
+            [[210.20, 210.30], [2.85, 2.90]] # in north, ramin, ramax, decmin, decmax
+            [[351.55, 351.65], [-32.45, -32.35]], # in south, ramin, ramax, decmin, decmax
+            [[356.90, 356.95], [-28.15, -28.10]] # in south, ramin, ramax, decmin, decmax
         ]
+        # Ive put in these extra masks as there are some iffy regions that may need additional masking.
+        # for certain the 1st, and 3rd region here are needed. Need to check on the 
+        # seg viewer that the others are justified. Perhaps also
+        # the snugness of the masks might be causing some isses as well.
+        # the ghostmasks may also be a bit too smug. I guess i need to go back to the
+        # other stacked plots to check on this more thoroughly.
 
     # ---------------------------------------------------------------------- #
     # Private helpers
