@@ -633,7 +633,7 @@ class WavesWideClustering:
         ra_rand,
         dec_rand,
         selection,
-        bins=200,
+        bins=500,
     ):
         """
         Save-only 2D density diagnostic.
