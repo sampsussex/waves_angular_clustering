@@ -165,9 +165,9 @@ class WavesWideClustering:
 
         self.extra_rec_masks = [
             [[165.9, 165.95], [-3.95, -3.7]], # in north, ramin, ramax, decmin, decmax
-            [[210.20, 210.30], [2.85, 2.90]], # in north, ramin, ramax, decmin, decmax
-            [[351.55, 351.65], [-32.45, -32.35]], # in south, ramin, ramax, decmin, decmax
-            [[356.90, 356.95], [-28.15, -28.10]] # in south, ramin, ramax, decmin, decmax
+            [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
+            [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
+            [[18.4, 18.5], [-31.80, -31.70]] # in south, ramin, ramax, decmin, decmax
         ]
         # Ive put in these extra masks as there are some iffy regions that may need additional masking.
         # for certain the 1st, and 3rd region here are needed. Need to check on the 
@@ -685,6 +685,7 @@ class WavesWideClustering:
             ra_data_plot,
             dec_data,
             bins=[x_bins, y_bins],
+            cmap='coolwarm',
         )
         axes[0].set_aspect('equal')
         axes[0].set_title('Data')
@@ -699,6 +700,7 @@ class WavesWideClustering:
             ra_rand_plot,
             dec_rand,
             bins=[x_bins, y_bins],
+            cmap='coolwarm',
         )
         axes[1].set_aspect('equal')
         axes[1].set_title('Randoms')
@@ -732,6 +734,7 @@ class WavesWideClustering:
             diff.T,
             origin='lower',
             aspect='equal',
+            cmap='coolwarm',
             extent=[
                 xedges[0], xedges[-1],
                 yedges[0], yedges[-1]
