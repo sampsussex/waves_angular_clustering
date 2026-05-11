@@ -113,7 +113,7 @@ class WavesWideClustering:
 
         self.n_randoms_filepath = n_randoms_filepath
         self.s_randoms_filepath = s_randoms_filepath
-        self.randoms_realisation_to_load = [0, 1, 2, 3, 4]
+        self.randoms_realisation_to_load = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
         self.results_directory = results_directory
 
