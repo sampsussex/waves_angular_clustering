@@ -121,7 +121,7 @@ class WavesWideClustering:
         # and used when reconstructing an RR object from cache.
         self.min_sep   = 0.01
         self.max_sep   = 10
-        self.nbins     = 30
+        self.nbins     = 50
         self.sep_units = 'degrees'
 
         self.data_ra_col = 'RAmax'
