@@ -75,6 +75,12 @@ class AngularClustering:
         )
         rr.process(self.rand_cat)
 
+                # In AngularClustering.do_correlations(), after rr.process(self.rand_cat):
+        self.dd = dd   # expose for diagnostics
+        self.dr = dr
+        self.rr = rr
+
+
         self.xi, self.varxi = dd.calculateXi(rr=rr, dr=dr)
         self.meanlogr = dd.meanlogr
 
@@ -462,6 +468,10 @@ class WavesWideClustering:
         ac.do_correlations()
         print("  Clustering computation complete.")
         save_path = self._get_results_path(selection)
+        ac.do_correlations()
+        print("  Clustering computation complete.")
+        print("  Saving DD/DR/RR diagnostic plot and raw values...")   # new
+        self.plot_dd_dr_rr(ac.dd, ac.dr, ac.rr, selection)            # new
         print(f"  Saving results to {save_path}...")
         os.makedirs(self.results_directory, exist_ok=True)
         ac.save_results(save_path)
@@ -749,6 +759,71 @@ class WavesWideClustering:
         plt.savefig(save_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved density diagnostic to {save_path}")
+
+
+    def plot_dd_dr_rr(self, dd, dr, rr, selection):
+        """
+        Plot and save DD, DR, RR pair counts (weight and npairs) as a function
+        of mean separation, and save the raw values to a JSON file.
+        Both are written to the diagnostics directory.
+        """
+        diag_dir = self._get_diagnostics_directory()
+        base = self._selection_to_filename(selection).replace(".json", "")
+
+        # ------------------------------------------------------------------ #
+        # Save raw values
+        # ------------------------------------------------------------------ #
+        raw = {}
+        for label, corr in [('DD', dd), ('DR', dr), ('RR', rr)]:
+            raw[label] = {
+                'meanr':    corr.meanr.tolist(),
+                'meanlogr': corr.meanlogr.tolist(),
+                'weight':   corr.weight.tolist(),
+                'npairs':   corr.npairs.tolist(),
+            }
+
+        raw_path = os.path.join(diag_dir, f"{base}__dd_dr_rr_raw.json")
+        with open(raw_path, 'w') as f:
+            json.dump(raw, f, indent=2)
+        print(f"  Saved DD/DR/RR raw values to {raw_path}")
+
+        # ------------------------------------------------------------------ #
+        # Plot
+        # ------------------------------------------------------------------ #
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle(
+            "Pair counts: DD / DR / RR\n" +
+            " | ".join(f"{k}={v}" for k, v in selection.items()),
+            fontsize=9
+        )
+
+        colours = {'DD': 'steelblue', 'DR': 'darkorange', 'RR': 'seagreen'}
+
+        for label, corr in [('DD', dd), ('DR', dr), ('RR', rr)]:
+            sep = corr.meanr          # degrees
+            axes[0].plot(sep, corr.weight, marker='o', ms=3, lw=1,
+                        color=colours[label], label=label)
+            axes[1].plot(sep, corr.npairs, marker='o', ms=3, lw=1,
+                        color=colours[label], label=label)
+
+        for ax, ylabel, title in zip(
+            axes,
+            ['Weighted pair counts  (weight)', 'Raw pair counts  (npairs)'],
+            ['weight', 'npairs'],
+        ):
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            ax.set_xlabel('Mean separation (degrees)')
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.legend(framealpha=0.7)
+            ax.grid(True, which='both', ls=':', alpha=0.4)
+
+        plt.tight_layout()
+        plot_path = os.path.join(diag_dir, f"{base}__dd_dr_rr.png")
+        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Saved DD/DR/RR diagnostic plot to {plot_path}")
 
 # --------------------------------------------------------------------------- #
 # Plotting
