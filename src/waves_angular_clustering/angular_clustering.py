@@ -57,12 +57,12 @@ class AngularClustering:
         dd = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
-            var_method=self.var_method, bin_slop=0, brute=True
+            var_method=self.var_method
         )
         dr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
-            var_method=self.var_method, bin_slop=0, brute=True
+            var_method=self.var_method
         )
         dd.process(self.data_cat)
         dr.process(self.data_cat, self.rand_cat)
@@ -71,15 +71,13 @@ class AngularClustering:
         rr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units, 
-            var_method=self.var_method, bin_slop=0, brute=True
+            var_method=self.var_method
         )
         rr.process(self.rand_cat)
 
-                # In AngularClustering.do_correlations(), after rr.process(self.rand_cat):
         self.dd = dd   # expose for diagnostics
         self.dr = dr
         self.rr = rr
-
 
         self.xi, self.varxi = dd.calculateXi(rr=rr, dr=dr)
         self.meanlogr = dd.meanlogr
@@ -135,8 +133,6 @@ class WavesWideClustering:
             'duplicate'
         ]
         self.columns_to_load_stargal = ['uberID', 'stargal']
-        # NOTE: 'ghostmask' added here — it is used in _load_randoms but was
-        # missing from the original columns list.
         self.columns_to_load_randoms = [
             self.randoms_ra_col, self.randoms_dec_col,
             'starmask', 'ghostmask', 'polygon_mask', 'realisation'
@@ -145,8 +141,6 @@ class WavesWideClustering:
         # ------------------------------------------------------------------ #
         # Selection definitions
         # ------------------------------------------------------------------ #
-        # NOTE: unified naming — was 'TOPZ+SFM' in possible_selections but
-        # 'TOPZ/SFM/R50' in selections_to_run. Standardised to 'TOPZ/SFM/R50'.
         self.possible_selections = {
             'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star'],
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
@@ -165,22 +159,17 @@ class WavesWideClustering:
 
         self._validate_selections(selections_to_run)
 
-        # Expand the dict-of-lists into a flat list of individual selection dicts,
-        # one per combination (Cartesian product).
         self.selections_to_run = self._expand_selections(selections_to_run)
 
+        # Number of RA strips for the jackknife-style spatial split
+        self.n_ra_strips = 10
+
         self.extra_rec_masks = [
-            [[165.9, 165.95], [-3.95, -3.7]], # in north, ramin, ramax, decmin, decmax
-            [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
-            [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
-            [[18.4, 18.5], [-31.80, -31.70]] # in south, ramin, ramax, decmin, decmax
+            [[165.9, 165.95], [-3.95, -3.7]],
+            [[215.4, 215.5], [3.7, 3.95]],
+            [[17.85, 17.95], [-30.15, -30.05]],
+            [[18.4, 18.5], [-31.80, -31.70]]
         ]
-        # Ive put in these extra masks as there are some iffy regions that may need additional masking.
-        # for certain the 1st, and 3rd region here are needed. Need to check on the 
-        # seg viewer that the others are justified. Perhaps also
-        # the snugness of the masks might be causing some isses as well.
-        # the ghostmasks may also be a bit too smug. I guess i need to go back to the
-        # other stacked plots to check on this more thoroughly.
 
     # ---------------------------------------------------------------------- #
     # Private helpers
@@ -218,12 +207,33 @@ class WavesWideClustering:
         name = "__".join(parts).replace(' ', '_').replace('<', 'lt').replace('/', '-')
         return f"clustering__{name}.json"
 
-    def _get_results_path(self, selection):
-        return os.path.join(self.results_directory, self._selection_to_filename(selection))
+    def _get_results_path(self, selection, strip_index=None):
+        """
+        Return the save path for a given selection.
 
-    def _check_if_results_exist(self, selection):
-        """Return True if results have already been saved for this selection."""
-        return os.path.isfile(self._get_results_path(selection))
+        Parameters
+        ----------
+        selection : dict
+        strip_index : int or None
+            If given, appends ``__strip_N`` to the filename stem so that each
+            RA strip is saved as a separate file.
+        """
+        base = self._selection_to_filename(selection)
+        if strip_index is not None:
+            # Insert strip suffix before the .json extension
+            base = base.replace('.json', f'__strip_{strip_index}.json')
+        return os.path.join(self.results_directory, base)
+
+    def _check_if_results_exist(self, selection, strip_index=None):
+        """Return True if results have already been saved for this selection (and strip)."""
+        return os.path.isfile(self._get_results_path(selection, strip_index=strip_index))
+
+    def _check_if_all_strips_exist(self, selection):
+        """Return True only when every strip result file already exists on disk."""
+        return all(
+            self._check_if_results_exist(selection, strip_index=i)
+            for i in range(self.n_ra_strips)
+        )
 
     def _get_filepaths_for_selection(self, selection):
         """Return (photom_fp, stargal_fp, randoms_fp) for a given region."""
@@ -238,12 +248,113 @@ class WavesWideClustering:
             raise ValueError(f"Unknown region: '{region}'")
 
     # ---------------------------------------------------------------------- #
+    # RA wrapping
+    # ---------------------------------------------------------------------- #
+
+    def _wrap_ra_for_region(self, ra, selection):
+        """
+        For WWS, wrap RA values > 180 deg into negative RA values so that the
+        survey footprint is contiguous in the wrapped coordinate system.
+
+        Example:  359 -> -1,  270 -> -90,  181 -> -179
+        """
+        ra = np.asarray(ra).copy()
+        if selection.get("region") == "WWS":
+            ra[ra > 180] -= 360
+        return ra
+
+    def _unwrap_ra(self, ra_wrapped, selection):
+        """
+        Reverse _wrap_ra_for_region: bring negative RA values back to [0, 360).
+        """
+        ra = np.asarray(ra_wrapped).copy()
+        if selection.get("region") == "WWS":
+            ra[ra < 0] += 360
+        return ra
+
+    # ---------------------------------------------------------------------- #
+    # RA-strip splitting
+    # ---------------------------------------------------------------------- #
+
+    def _split_catalog_by_ra_strips(self, ra_data, dec_data, ra_rand, dec_rand,
+                                    selection, n_strips=None):
+        """
+        Split data and randoms catalogs into *n_strips* equal-width RA strips.
+
+        RA wrapping is applied before computing strip edges so that WWS sources
+        that straddle RA=0 are handled correctly, then unwrapped before
+        returning so that treecorr always receives native (0–360) coordinates.
+
+        Parameters
+        ----------
+        ra_data, dec_data : ndarray
+        ra_rand, dec_rand : ndarray
+        selection : dict
+        n_strips : int or None
+            Defaults to self.n_ra_strips.
+
+        Yields
+        ------
+        strip_index : int
+        ra_data_strip, dec_data_strip, ra_rand_strip, dec_rand_strip : ndarray
+            Native (unwrapped) RA coordinates and corresponding Dec arrays for
+            the objects that fall inside this RA strip.
+        """
+        if n_strips is None:
+            n_strips = self.n_ra_strips
+
+        # Work in wrapped coordinates so the footprint is contiguous
+        ra_data_w = self._wrap_ra_for_region(ra_data, selection)
+        ra_rand_w = self._wrap_ra_for_region(ra_rand, selection)
+
+        # Derive strip edges from the *combined* RA extent of data + randoms
+        # so that every strip is the same angular width regardless of whether
+        # the data or the randoms happen to extend slightly further.
+        ra_all_w  = np.concatenate([ra_data_w, ra_rand_w])
+        ra_min_w  = ra_all_w.min()
+        ra_max_w  = ra_all_w.max()
+        edges     = np.linspace(ra_min_w, ra_max_w, n_strips + 1)
+
+        print(f"  RA strip edges (wrapped): {edges}")
+
+        for i in range(n_strips):
+            lo, hi = edges[i], edges[i + 1]
+
+            # Include the upper boundary only for the last strip so that no
+            # source is double-counted.
+            if i < n_strips - 1:
+                data_mask = (ra_data_w >= lo) & (ra_data_w < hi)
+                rand_mask = (ra_rand_w >= lo) & (ra_rand_w < hi)
+            else:
+                data_mask = (ra_data_w >= lo) & (ra_data_w <= hi)
+                rand_mask = (ra_rand_w >= lo) & (ra_rand_w <= hi)
+
+            n_data = data_mask.sum()
+            n_rand = rand_mask.sum()
+
+            if n_data == 0:
+                print(f"  Strip {i}: no data points in RA [{lo:.3f}, {hi:.3f}] — skipping.")
+                continue
+            if n_rand == 0:
+                print(f"  Strip {i}: no random points in RA [{lo:.3f}, {hi:.3f}] — skipping.")
+                continue
+
+            print(f"  Strip {i}: RA [{lo:.3f}, {hi:.3f}]  data={n_data}  randoms={n_rand}")
+
+            # Unwrap back to native coordinates before handing to treecorr
+            ra_data_strip = self._unwrap_ra(ra_data_w[data_mask], selection)
+            ra_rand_strip = self._unwrap_ra(ra_rand_w[rand_mask], selection)
+            dec_data_strip = dec_data[data_mask]
+            dec_rand_strip = dec_rand[rand_mask]
+
+            yield i, ra_data_strip, dec_data_strip, ra_rand_strip, dec_rand_strip
+
+    # ---------------------------------------------------------------------- #
     # Data loading
     # ---------------------------------------------------------------------- #
 
     def _get_extra_rec_masks(self, ra, dec):
         """Return boolean mask excluding regions in self.extra_rec_masks."""
-        
         if not self.extra_rec_masks:
             return np.ones(len(ra), dtype=bool)
 
@@ -266,8 +377,6 @@ class WavesWideClustering:
         # ------------------------------------------------------------------ #
         # Star/galaxy separation
         # ------------------------------------------------------------------ #
-        # Initialise stargal column to NaN so the base_selection mask works
-        # correctly even for rows that don't match the chosen method.
         df['stargal'] = np.nan
 
         if selection['star_gal_method'] == 'TOPZ/SFM/R50':
@@ -275,16 +384,13 @@ class WavesWideClustering:
             df_stargal = pd.read_parquet(stargal_filepath, columns=self.columns_to_load_stargal)
             df_stargal['uberID'] = df_stargal['uberID'].astype(np.int64)
             print(f"  Loaded {len(df_stargal)} rows from stargal catalogue.")
-            # Merge brings in the external stargal classification
             df = df.merge(df_stargal, on='uberID', how='left', suffixes=('', '_ext'))
             del df_stargal
-            # Use the external column if present, fall back to the initialised NaN
             if 'stargal_ext' in df.columns:
                 df['stargal'] = df['stargal_ext']
                 df.drop(columns=['stargal_ext'], inplace=True)
 
         elif selection['star_gal_method'] == 'baseline':
-            # Use the photometric 'class' column directly
             df['stargal'] = df['class']
 
         # ------------------------------------------------------------------ #
@@ -295,8 +401,9 @@ class WavesWideClustering:
             (df['mask'] == False) &
             (df['starmask'] == False)
         )
-        extra_rec_masks = self._get_extra_rec_masks(df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy())
-
+        extra_rec_masks = self._get_extra_rec_masks(
+            df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy()
+        )
         base_selection &= extra_rec_masks
 
         target = selection['target_selection']
@@ -320,16 +427,16 @@ class WavesWideClustering:
 
         df_sel = df.loc[base_selection].copy()
         del base_selection
-        del df  # free memory
+        del df
 
         if len(df_sel) == 0:
             raise ValueError(
                 f"Dataset is empty after applying selection: {selection}"
             )
 
-        ra_data = df_sel[self.data_ra_col].to_numpy(copy=True)
+        ra_data  = df_sel[self.data_ra_col].to_numpy(copy=True)
         dec_data = df_sel[self.data_dec_col].to_numpy(copy=True)
-        del df_sel  # free memory
+        del df_sel
 
         if np.any(np.isnan(ra_data)) or np.any(np.isnan(dec_data)):
             raise ValueError(
@@ -349,7 +456,9 @@ class WavesWideClustering:
             (df['realisation'].isin(self.randoms_realisation_to_load))
         )
 
-        extra_rec_masks = self._get_extra_rec_masks(df[self.randoms_ra_col].to_numpy(), df[self.randoms_dec_col].to_numpy())
+        extra_rec_masks = self._get_extra_rec_masks(
+            df[self.randoms_ra_col].to_numpy(), df[self.randoms_dec_col].to_numpy()
+        )
         base_selection &= extra_rec_masks
 
         if selection['ghostmask_selection'] == 'with ghostmask':
@@ -362,10 +471,10 @@ class WavesWideClustering:
                 f"Randoms catalogue is empty after applying selection: {selection}"
             )
 
-        ra_randoms = df_sel[self.randoms_ra_col].to_numpy(copy=True)
+        ra_randoms  = df_sel[self.randoms_ra_col].to_numpy(copy=True)
         dec_randoms = df_sel[self.randoms_dec_col].to_numpy(copy=True)
         print(f"  Loaded {len(ra_randoms)} random points after selection.")
-        del df_sel  # free memory
+        del df_sel
         return ra_randoms, dec_randoms
 
     def _load_WWC_data(self, selection):
@@ -395,18 +504,22 @@ class WavesWideClustering:
 
     def get_previously_run_results(self):
         """
-        Return a list of result dicts for all selections that already have
-        saved output. Also removes those selections from self.selections_to_run
-        so they are not recomputed.
+        Return a list of (selection, strip_index, result) tuples for strips
+        that already have saved output on disk.  Also removes fully-completed
+        selections from self.selections_to_run so they are not recomputed.
         """
-        already_run = []
-        remaining = []
+        already_run   = []   # list of result dicts
+        remaining     = []   # selections still needing at least one strip run
+
         for selection in self.selections_to_run:
-            if self._check_if_results_exist(selection):
-                results = self.load_results(self._get_results_path(selection))
-                already_run.append(results)
+            if self._check_if_all_strips_exist(selection):
+                for i in range(self.n_ra_strips):
+                    path = self._get_results_path(selection, strip_index=i)
+                    if os.path.isfile(path):
+                        already_run.append(self.load_results(path))
             else:
                 remaining.append(selection)
+
         self.selections_to_run = remaining
         return already_run
 
@@ -416,8 +529,9 @@ class WavesWideClustering:
 
     def get_clustering_for_selection(self, selection):
         """
-        Run the angular clustering pipeline for a single selection dict and
-        save the result to disk. Returns the results dict.
+        Run the angular clustering pipeline for a single selection dict,
+        splitting the catalogs into RA strips and saving each strip's result
+        to a separate file.  Returns a list of result dicts (one per strip).
         """
         print(f"Running clustering for: {selection}")
 
@@ -437,72 +551,77 @@ class WavesWideClustering:
         self._diagnose_catalog("Data and Randoms", ra_data, dec_data, ra_rand, dec_rand)
 
         print("  Generating diagnostic plots...")
-        self.plot_ra_dec_histograms(
-            ra_data,
-            dec_data,
-            ra_rand,
-            dec_rand,
-            selection,
-        )
+        self.plot_ra_dec_histograms(ra_data, dec_data, ra_rand, dec_rand, selection)
         print("  Saved RA/Dec histogram diagnostics.")
-        print("  Generating RA/Dec density diagnostic...")
-        self.plot_ra_dec_density(
-            ra_data,
-            dec_data,
-            ra_rand,
-            dec_rand,
-            selection,
-        )
-
+        self.plot_ra_dec_density(ra_data, dec_data, ra_rand, dec_rand, selection)
         print("  Initial diagnostics complete.")
-        print("  Initialising AngularClustering instance...")
-        ac = AngularClustering(
-            ra_cat=ra_data, dec_cat=dec_data,
-            ra_rand=ra_rand, dec_rand=dec_rand,
-            selection_dic=selection,
-            min_sep=self.min_sep, max_sep=self.max_sep,
-            nbins=self.nbins, sep_units=self.sep_units,
-        )
-        print("  Computing correlations...")
-        print("  Computing DD, DR, RR, and xi...")
-        ac.do_correlations()
-        print("  Clustering computation complete.")
-        save_path = self._get_results_path(selection)
-        ac.do_correlations()
-        print("  Clustering computation complete.")
-        print("  Saving DD/DR/RR diagnostic plot and raw values...")   # new
-        self.plot_dd_dr_rr(ac.dd, ac.dr, ac.rr, selection)            # new
-        print(f"  Saving results to {save_path}...")
-        os.makedirs(self.results_directory, exist_ok=True)
-        ac.save_results(save_path)
-        print(f"  Saved to {save_path}")
 
-        results = ac.results
-        print("  Cleaning up treecorr catalogs from memory...")
-        ac.clean_up()
-        del ac  # free memory
-        del ra_data, dec_data, ra_rand, dec_rand  # free memory
-        print("  Done.")
+        strip_results = []
+
+        for strip_index, ra_d, dec_d, ra_r, dec_r in self._split_catalog_by_ra_strips(
+            ra_data, dec_data, ra_rand, dec_rand, selection
+        ):
+            # Skip strips whose results are already on disk
+            if self._check_if_results_exist(selection, strip_index=strip_index):
+                print(f"  Strip {strip_index}: results already exist — loading from disk.")
+                result = self.load_results(
+                    self._get_results_path(selection, strip_index=strip_index)
+                )
+                strip_results.append(result)
+                continue
+
+            print(f"  Strip {strip_index}: initialising AngularClustering instance...")
+
+            # Embed the strip index in the selection metadata so it is stored
+            # alongside the correlation function in the JSON file.
+            selection_with_strip = dict(selection, ra_strip=strip_index)
+
+            ac = AngularClustering(
+                ra_cat=ra_d, dec_cat=dec_d,
+                ra_rand=ra_r, dec_rand=dec_r,
+                selection_dic=selection_with_strip,
+                min_sep=self.min_sep, max_sep=self.max_sep,
+                nbins=self.nbins, sep_units=self.sep_units,
+            )
+            print(f"  Strip {strip_index}: computing DD, DR, RR, and xi...")
+            ac.do_correlations()
+            print(f"  Strip {strip_index}: clustering computation complete.")
+
+            print(f"  Strip {strip_index}: saving DD/DR/RR diagnostic...")
+            self.plot_dd_dr_rr(ac.dd, ac.dr, ac.rr, selection_with_strip)
+
+            save_path = self._get_results_path(selection, strip_index=strip_index)
+            os.makedirs(self.results_directory, exist_ok=True)
+            ac.save_results(save_path)
+            print(f"  Strip {strip_index}: results saved to {save_path}")
+
+            strip_results.append(ac.results)
+            ac.clean_up()
+            del ac
+
+        del ra_data, dec_data, ra_rand, dec_rand
+        print(f"  All {len(strip_results)} strips complete for selection: {selection}")
         print("-" * 50)
-        return results
+        return strip_results
 
     def get_clustering_for_all_selections_to_run(self):
         """
         Run the angular clustering pipeline for every selection in
-        self.selections_to_run. Skips any for which results already exist.
-        Returns a list of result dicts (new + previously saved).
+        self.selections_to_run. Skips any for which all strip results already
+        exist.  Returns a flat list of result dicts (one per strip, all
+        selections combined).
         """
         all_results = self.get_previously_run_results()
 
         for selection in self.selections_to_run:
             try:
-                result = self.get_clustering_for_selection(selection)
-                all_results.append(result)
+                strip_results = self.get_clustering_for_selection(selection)
+                all_results.extend(strip_results)
             except Exception as e:
                 print(f"  ERROR for selection {selection}: {e}")
 
         return all_results
-    
+
     def _diagnose_catalog(self, name, ra_data, dec_data, ra_rand, dec_rand):
         print(f"\n{name} diagnostics")
         print(f"  data:    N={len(ra_data)}, RA=({ra_data.min():.3f}, {ra_data.max():.3f}), Dec=({dec_data.min():.3f}, {dec_data.max():.3f})")
@@ -514,7 +633,6 @@ class WavesWideClustering:
         os.makedirs(diag_dir, exist_ok=True)
         return diag_dir
 
-
     def _get_diagnostic_plot_path(self, selection, plot_type):
         """
         plot_type examples:
@@ -523,31 +641,8 @@ class WavesWideClustering:
         """
         base = self._selection_to_filename(selection)
         base = base.replace(".json", "")
-
         filename = f"{base}__{plot_type}.png"
-
-        return os.path.join(
-            self._get_diagnostics_directory(),
-            filename
-        )
-
-
-    def _wrap_ra_for_region(self, ra, selection):
-        """
-        For WWS, wrap RA values > 180 deg into negative RA values.
-
-        Example:
-            359 -> -1
-            270 -> -90
-            181 -> -179
-        """
-        ra = np.asarray(ra).copy()
-
-        if selection.get("region") == "WWS":
-            ra[ra > 180] -= 360
-
-        return ra
-
+        return os.path.join(self._get_diagnostics_directory(), filename)
 
     def plot_ra_dec_histograms(
         self,
@@ -562,67 +657,28 @@ class WavesWideClustering:
         """
         Save-only 1D RA/Dec histogram comparison.
         """
-
-        save_path = self._get_diagnostic_plot_path(
-            selection,
-            "hist1d"
-        )
+        save_path = self._get_diagnostic_plot_path(selection, "hist1d")
 
         ra_data_plot = self._wrap_ra_for_region(ra_data, selection)
         ra_rand_plot = self._wrap_ra_for_region(ra_rand, selection)
 
         fig, axes = plt.subplots(1, 2, figsize=(5, 5))
-
         density = normalise
 
-        # --------------------------------------------------
-        # RA histogram
-        # --------------------------------------------------
-        axes[0].hist(
-            ra_data_plot,
-            bins=bins,
-            histtype='step',
-            linewidth=2,
-            density=density,
-            label='Data'
-        )
-
-        axes[0].hist(
-            ra_rand_plot,
-            bins=bins,
-            histtype='step',
-            linewidth=2,
-            density=density,
-            label='Randoms'
-        )
-
+        axes[0].hist(ra_data_plot, bins=bins, histtype='step', linewidth=2,
+                     density=density, label='Data')
+        axes[0].hist(ra_rand_plot, bins=bins, histtype='step', linewidth=2,
+                     density=density, label='Randoms')
         axes[0].set_xlabel('RA [deg]')
         axes[0].set_ylabel('Density' if density else 'Counts')
         axes[0].set_title('RA distribution')
         axes[0].legend()
         axes[0].grid(alpha=0.3)
 
-        # --------------------------------------------------
-        # Dec histogram
-        # --------------------------------------------------
-        axes[1].hist(
-            dec_data,
-            bins=bins,
-            histtype='step',
-            linewidth=2,
-            density=density,
-            label='Data'
-        )
-
-        axes[1].hist(
-            dec_rand,
-            bins=bins,
-            histtype='step',
-            linewidth=2,
-            density=density,
-            label='Randoms'
-        )
-
+        axes[1].hist(dec_data, bins=bins, histtype='step', linewidth=2,
+                     density=density, label='Data')
+        axes[1].hist(dec_rand, bins=bins, histtype='step', linewidth=2,
+                     density=density, label='Randoms')
         axes[1].set_xlabel('Dec [deg]')
         axes[1].set_ylabel('Density' if density else 'Counts')
         axes[1].set_title('Dec distribution')
@@ -632,9 +688,7 @@ class WavesWideClustering:
         plt.tight_layout()
         plt.savefig(save_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
-
         print(f"  Saved histogram diagnostic to {save_path}")
-
 
     def plot_ra_dec_density(
         self,
@@ -648,88 +702,52 @@ class WavesWideClustering:
         """
         Save-only 2D density diagnostic.
         """
-        save_path = self._get_diagnostic_plot_path(
-            selection,
-            "density2d"
-        )
+        save_path = self._get_diagnostic_plot_path(selection, "density2d")
         ra_data_plot = self._wrap_ra_for_region(ra_data, selection)
         ra_rand_plot = self._wrap_ra_for_region(ra_rand, selection)
 
-        # --------------------------------------------------
-        # Derive true data extents from combined data + randoms
-        # --------------------------------------------------
         ra_all  = np.concatenate([ra_data_plot, ra_rand_plot])
         dec_all = np.concatenate([dec_data,     dec_rand])
 
         ra_min,  ra_max  = ra_all.min(),  ra_all.max()
         dec_min, dec_max = dec_all.min(), dec_all.max()
 
-        ra_range  = ra_max  - ra_min   # full RA  span in degrees
-        dec_range = dec_max - dec_min  # full Dec span in degrees
+        ra_range  = ra_max  - ra_min
+        dec_range = dec_max - dec_min
 
-        # Equal angular bin size: choose one bin width in degrees that applies
-        # to both axes, then derive the number of bins on each axis.
-        bin_deg   = ra_range / bins          # bin size driven by the longer axis
-        n_ra_bins = bins                     # exactly `bins` cells along RA
-        n_dec_bins = max(1, int(np.round(dec_range / bin_deg)))  # matched cell size
+        bin_deg    = ra_range / bins
+        n_ra_bins  = bins
+        n_dec_bins = max(1, int(np.round(dec_range / bin_deg)))
 
         x_bins = np.linspace(ra_min,  ra_max,  n_ra_bins  + 1)
         y_bins = np.linspace(dec_min, dec_max, n_dec_bins + 1)
 
-        # --------------------------------------------------
-        # Figure sizing: one pixel of figure space per bin cell,
-        # scaled up so the shorter axis stays legible.
-        # --------------------------------------------------
-        aspect_ratio = n_ra_bins / n_dec_bins   # e.g. ~69 if RA≈8×Dec
-
-        min_panel_height = 4.0          # inches — floor so Dec detail is visible
-        panel_height = max(min_panel_height, 18.0 / aspect_ratio)
-        panel_width  = panel_height * aspect_ratio
+        aspect_ratio    = n_ra_bins / n_dec_bins
+        min_panel_height = 4.0
+        panel_height    = max(min_panel_height, 18.0 / aspect_ratio)
+        panel_width     = panel_height * aspect_ratio
 
         fig, axes = plt.subplots(3, 1, figsize=(panel_width, panel_height * 3))
 
-        # --------------------------------------------------
-        # Data density
-        # --------------------------------------------------
-        h1 = axes[0].hist2d(
-            ra_data_plot,
-            dec_data,
-            bins=[x_bins, y_bins],
-            cmap='coolwarm',
-        )
+        h1 = axes[0].hist2d(ra_data_plot, dec_data, bins=[x_bins, y_bins], cmap='coolwarm')
         axes[0].set_aspect('equal')
         axes[0].set_title('Data')
         axes[0].set_xlabel('RA [deg]')
         axes[0].set_ylabel('Dec [deg]')
         fig.colorbar(h1[3], ax=axes[0])
 
-        # --------------------------------------------------
-        # Random density
-        # --------------------------------------------------
-        h2 = axes[1].hist2d(
-            ra_rand_plot,
-            dec_rand,
-            bins=[x_bins, y_bins],
-            cmap='coolwarm',
-        )
+        h2 = axes[1].hist2d(ra_rand_plot, dec_rand, bins=[x_bins, y_bins], cmap='coolwarm')
         axes[1].set_aspect('equal')
         axes[1].set_title('Randoms')
         axes[1].set_xlabel('RA [deg]')
         axes[1].set_ylabel('Dec [deg]')
         fig.colorbar(h2[3], ax=axes[1])
 
-        # --------------------------------------------------
-        # Difference map
-        # --------------------------------------------------
         data_hist, xedges, yedges = np.histogram2d(
-            ra_data_plot,
-            dec_data,
-            bins=[x_bins, y_bins]
+            ra_data_plot, dec_data, bins=[x_bins, y_bins]
         )
         rand_hist, _, _ = np.histogram2d(
-            ra_rand_plot,
-            dec_rand,
-            bins=[xedges, yedges]
+            ra_rand_plot, dec_rand, bins=[xedges, yedges]
         )
 
         data_sum = np.sum(data_hist)
@@ -745,10 +763,7 @@ class WavesWideClustering:
             origin='lower',
             aspect='equal',
             cmap='coolwarm',
-            extent=[
-                xedges[0], xedges[-1],
-                yedges[0], yedges[-1]
-            ],
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
         )
         axes[2].set_title('Data - Randoms')
         axes[2].set_xlabel('RA [deg]')
@@ -760,7 +775,6 @@ class WavesWideClustering:
         plt.close(fig)
         print(f"  Saved density diagnostic to {save_path}")
 
-
     def plot_dd_dr_rr(self, dd, dr, rr, selection):
         """
         Plot and save DD, DR, RR pair counts (weight and npairs) as a function
@@ -770,9 +784,6 @@ class WavesWideClustering:
         diag_dir = self._get_diagnostics_directory()
         base = self._selection_to_filename(selection).replace(".json", "")
 
-        # ------------------------------------------------------------------ #
-        # Save raw values
-        # ------------------------------------------------------------------ #
         raw = {}
         for label, corr in [('DD', dd), ('DR', dr), ('RR', rr)]:
             raw[label] = {
@@ -787,9 +798,6 @@ class WavesWideClustering:
             json.dump(raw, f, indent=2)
         print(f"  Saved DD/DR/RR raw values to {raw_path}")
 
-        # ------------------------------------------------------------------ #
-        # Plot
-        # ------------------------------------------------------------------ #
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         fig.suptitle(
             "Pair counts: DD / DR / RR\n" +
@@ -800,7 +808,7 @@ class WavesWideClustering:
         colours = {'DD': 'steelblue', 'DR': 'darkorange', 'RR': 'seagreen'}
 
         for label, corr in [('DD', dd), ('DR', dr), ('RR', rr)]:
-            sep = corr.meanr          # degrees
+            sep = corr.meanr
             axes[0].plot(sep, corr.weight, marker='o', ms=3, lw=1,
                         color=colours[label], label=label)
             axes[1].plot(sep, corr.npairs, marker='o', ms=3, lw=1,
@@ -825,25 +833,24 @@ class WavesWideClustering:
         plt.close(fig)
         print(f"  Saved DD/DR/RR diagnostic plot to {plot_path}")
 
+
 # --------------------------------------------------------------------------- #
 # Plotting
 # --------------------------------------------------------------------------- #
 
-# Colour keyed on target_selection value
 _COLOUR_BY_TARGET = {
     'star':               'red',
     'galaxy':             'blue',
     'galaxy/ambiguous':   'green',
 }
-_DEFAULT_COLOUR = 'grey'   # fallback for unrecognised target_selection values
+_DEFAULT_COLOUR = 'grey'
 
-# Line style keyed on star_gal_method value
 _LINESTYLE_BY_METHOD = {
-    'TOPZ/SFM/R50': '-',    # solid
-    'baseline':     '--',   # dashed
-    'UMAP':         ':',    # double-dashed (dotted)
+    'TOPZ/SFM/R50': '-',
+    'baseline':     '--',
+    'UMAP':         ':',
 }
-_DEFAULT_LINESTYLE = '-'    # fallback
+_DEFAULT_LINESTYLE = '-'
 
 
 def _colour_for(selection: dict) -> str:
@@ -861,13 +868,14 @@ def _label_for(selection: dict, title_keys: set) -> str:
     Build a legend label from *selection*, omitting:
       - keys whose value appears in title_keys (already shown in the panel title)
       - keys whose value is None
+      - the 'ra_strip' key (handled separately if needed)
 
     Only the VALUES are shown (no 'key=' prefix).
     """
     parts = [
         str(v)
         for k, v in selection.items()
-        if v is not None and str(v) not in title_keys
+        if v is not None and str(v) not in title_keys and k != 'ra_strip'
     ]
     return ', '.join(parts) if parts else 'default'
 
@@ -881,15 +889,13 @@ def _build_panel_title(panel_results: list) -> tuple[str, set]:
     if not panel_results:
         return '', set()
 
-    # Collect all unique values per key across every result on this panel
     from collections import defaultdict
     values_per_key = defaultdict(set)
     for r in panel_results:
         for k, v in r.get('selection', {}).items():
-            if v is not None:
+            if v is not None and k != 'ra_strip':
                 values_per_key[k].add(str(v))
 
-    # Keys with exactly one unique value → go in the title
     title_parts = [
         next(iter(vals))
         for vals in values_per_key.values()
@@ -920,8 +926,6 @@ class AngularClusteringPlots:
         self.num_panels = num_panels
         self.log_scale = log_scale
 
-        # selections_per_panel maps panel index -> list of result dicts to plot.
-        # Populated via assign_results_to_panel().
         self.selections_per_panel = {panel: [] for panel in range(num_panels)}
 
     def assign_results_to_panel(self, panel_index, selection_filters):
@@ -940,11 +944,6 @@ class AngularClusteringPlots:
         ----------
         panel_index : int
         selection_filters : dict
-            e.g. {
-                'target_selection':    ['galaxy', 'star'],
-                'survey_depth':        ['Z<21.1'],
-                'ghostmask_selection': 'no ghostmask',
-            }
         """
         if panel_index not in self.selections_per_panel:
             raise ValueError(
@@ -968,25 +967,19 @@ class AngularClusteringPlots:
         ]
         self.selections_per_panel[panel_index].extend(matched)
 
-    # ---------------------------------------------------------------------- #
-
     def plot_correlation_figure(self, ncols=None, figsize=None):
         """
         Draw all panels in a single figure.
-
-        Parameters
-        ----------
-        ncols : int or None
-            Number of columns in the subplot grid. Defaults to num_panels
-            (single row).
-        figsize : tuple or None
-            Passed to plt.subplots.
         """
         ncols = ncols or self.num_panels
         nrows = int(np.ceil(self.num_panels / ncols))
         figsize = figsize or (5 * ncols, 4 * nrows)
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=True, sharey=True, constrained_layout=True)
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=figsize,
+            squeeze=False, sharex=True, sharey=True,
+            constrained_layout=True
+        )
         axes_flat = axes.flatten()
 
         for panel_idx in range(self.num_panels):
@@ -997,7 +990,6 @@ class AngularClusteringPlots:
             else:
                 ax.set_visible(False)
 
-        # Hide any unused axes beyond num_panels
         for ax in axes_flat[self.num_panels:]:
             ax.set_visible(False)
 
@@ -1006,14 +998,10 @@ class AngularClusteringPlots:
                 continue
             row = i // ncols
             col = i % ncols
-
             if col == 0:
                 ax.set_ylabel(r'$w(\theta)$')
-
-            # Label x-axis if there's no visible panel directly below
             next_row_idx = i + ncols
-            bottom_edge = (next_row_idx >= self.num_panels)
-            if bottom_edge:
+            if next_row_idx >= self.num_panels:
                 ax.set_xlabel(r'$\theta$ [degrees]')
 
         if self.save_location:
@@ -1027,16 +1015,7 @@ class AngularClusteringPlots:
     def _plot_correlation_function_subplot(self, ax, clustering_result_per_plot):
         """
         Plot one or more w(theta) curves on a single Axes.
-
-        Parameters
-        ----------
-        ax : matplotlib.axes.Axes
-        clustering_result_per_plot : list of dict
-            Each dict has keys 'selection' and 'columns'
-            (with sub-keys 'xi', 'varxi', 'meanlogr').
         """
-        # Work out which values are shared across all results on this panel so
-        # they can be shown in the title rather than repeated in every label.
         panel_title, title_value_set = _build_panel_title(clustering_result_per_plot)
 
         for result in clustering_result_per_plot:
@@ -1052,13 +1031,12 @@ class AngularClusteringPlots:
             linestyle = _linestyle_for(sel)
             label     = _label_for(sel, title_value_set)
 
-            # Only plot positive xi values on a log-log scale
             if self.log_scale:
                 pos_mask = xi > 0
                 if not np.any(pos_mask):
                     print(f"  Warning: no positive xi values for selection {sel}. Skipping.")
                     continue
-            else:                
+            else:
                 pos_mask = np.ones_like(xi, dtype=bool)
 
             ax.plot(
@@ -1070,16 +1048,16 @@ class AngularClusteringPlots:
             ax.errorbar(
                 r[pos_mask], xi[pos_mask],
                 yerr=np.sqrt(varxi[pos_mask]),
-                lw=1.5, alpha = 0.25, ls='', color=colour,
+                lw=1.5, alpha=0.25, ls='', color=colour,
             )
+
         if self.log_scale:
             ax.set_xscale('log')
             ax.set_yscale('log')
             ax.set_xlim(0.01, 10)
         else:
             ax.set_xlim(0.1, 3)
-        #ax.set_xlabel(r'$\theta$ [degrees]')
-        #ax.set_ylabel(r'$w(\theta)$')
+
         ax.legend(fontsize=7)
         ax.grid()
 
