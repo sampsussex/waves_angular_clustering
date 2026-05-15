@@ -492,12 +492,15 @@ class WavesWideClustering:
         self.selections_to_run. Skips any for which results already exist.
         Returns a list of result dicts (new + previously saved).
         """
+        print('Starting clustering for all selections...')
         all_results = self.get_previously_run_results()
-
+        print(f"Found {len(all_results)} previously computed results. {len(self.selections_to_run)} selections remaining to run.")
         for selection in self.selections_to_run:
             try:
+                print(f"\nProcessing selection: {selection}")
                 result = self.get_clustering_for_selection(selection)
                 all_results.append(result)
+                print(f"Completed selection: {selection}")
             except Exception as e:
                 print(f"  ERROR for selection {selection}: {e}")
 
