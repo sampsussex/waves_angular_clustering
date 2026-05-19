@@ -161,7 +161,7 @@ class WavesWideClustering:
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
             'survey_depth':       ['Z<21.1', '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50'],
-            'region':             ['WWN', 'WWS'],
+            'region':             ['WWN']#, 'WWS'],
         }
 
         self._validate_selections(selections_to_run)
@@ -175,6 +175,7 @@ class WavesWideClustering:
             [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
             [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
             [[18.4, 18.5], [-31.80, -31.70]] # in south, ramin, ramax, decmin, decmax
+            [[157.25, 225], [-3.95, -3.5]] 
         ]
         # Ive put in these extra masks as there are some iffy regions that may need additional masking.
         # for certain the 1st, and 3rd region here are needed. Need to check on the 
