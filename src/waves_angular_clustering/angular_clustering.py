@@ -378,6 +378,16 @@ class WavesWideClustering:
         # Star/galaxy separation
         # ------------------------------------------------------------------ #
         df['stargal'] = np.nan
+        print(f'Total objects: {len(df)}')
+
+        print(f'Objects in starmask: {df[df["starmask"] == True].shape[0]}')
+        print(f'Objects not in starmask: {df[df["starmask"] == False].shape[0]}')
+
+        print(f'Objects in ghostmask: {df[df["ghostmask"] == True].shape[0]}')
+        print(f'Objects not in ghostmask: {df[df["ghostmask"] == False].shape[0]}')
+
+        print(f'Objects in mask: {df[df["mask"] == True].shape[0]}')
+        print(f'Objects not in mask: {df[df["mask"] == False].shape[0]}')
 
         if selection['star_gal_method'] == 'TOPZ/SFM/R50':
             print(f"  Loading stargal classification from {stargal_filepath}...")
@@ -396,6 +406,7 @@ class WavesWideClustering:
         # ------------------------------------------------------------------ #
         # Build selection mask
         # ------------------------------------------------------------------ #
+
         base_selection = (
             (df['duplicate'] == False) &
             (df['mask'] == False) &
@@ -449,13 +460,21 @@ class WavesWideClustering:
     def _load_randoms(self, randoms_filepath, selection):
         print(f"  Loading randoms from {randoms_filepath} with selection {selection}...")
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
+        print(f'Objects in catalog: {len(df)}')
+        print(f'Objects in starmask: {df[df["starmask"] == True].shape[0]}')
+        print(f'Objects not in starmask: {df[df["starmask"] == False].shape[0]}')
 
+        print(f'Objects in ghostmask: {df[df["ghostmask"] == True].shape[0]}')
+        print(f'Objects not in ghostmask: {df[df["ghostmask"] == False].shape[0]}')
+
+        print(f'Objects in polygon_mask: {df[df["polygon_mask"] == True].shape[0]}')
+        print(f'Objects not in polygon_mask: {df[df["polygon_mask"] == False].shape[0]}')
         base_selection = (
             (df['starmask'] == False) &
             (df['polygon_mask'] == False) &
             (df['realisation'].isin(self.randoms_realisation_to_load))
         )
-
+        print(f'Objects in base selection: {np.sum(base_selection)}')
         extra_rec_masks = self._get_extra_rec_masks(
             df[self.randoms_ra_col].to_numpy(), df[self.randoms_dec_col].to_numpy()
         )
