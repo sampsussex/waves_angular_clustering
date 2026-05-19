@@ -113,7 +113,7 @@ class WavesWideClustering:
 
         self.n_randoms_filepath = n_randoms_filepath
         self.s_randoms_filepath = s_randoms_filepath
-        self.randoms_realisation_to_load = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        self.randoms_realisation_to_load = [0, 1, 2, 3, 4]
 
         self.results_directory = results_directory
 
@@ -150,7 +150,8 @@ class WavesWideClustering:
         self.possible_selections = {
             'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star'],
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
-            'survey_depth':       ['Z<21.1', 'Z<21.25', 'Z<22'],
+            'survey_depth':       ['Z<21.1', 'Z<21.25', 'Z<22',
+                                   '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
             'region':             ['WWN', 'WWS', 'WW combined'],
         }
@@ -158,7 +159,7 @@ class WavesWideClustering:
         selections_to_run = {
             'target_selection':   ['galaxy'],
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
-            'survey_depth':       ['Z<21.1'],
+            'survey_depth':       ['Z<21.1', '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50'],
             'region':             ['WWN', 'WWS'],
         }
@@ -317,6 +318,18 @@ class WavesWideClustering:
             base_selection &= df['mag_Zt'] < 21.25
         elif depth == 'Z<22':
             base_selection &= df['mag_Zt'] < 22
+        elif depth == '16<Z<17':
+            base_selection &= (df['mag_Zt'] > 16) & (df['mag_Zt'] < 17)
+        elif depth == '17<Z<18':
+            base_selection &= (df['mag_Zt'] > 17) & (df['mag_Zt'] < 18)
+        elif depth == '18<Z<19':
+            base_selection &= (df['mag_Zt'] > 18) & (df['mag_Zt'] < 19)
+        elif depth == '19<Z<20':
+            base_selection &= (df['mag_Zt'] > 19) & (df['mag_Zt'] < 20)
+        elif depth == '20<Z<21':
+            base_selection &= (df['mag_Zt'] > 20) & (df['mag_Zt'] < 21)
+        elif depth == '21<Z<22':
+            base_selection &= (df['mag_Zt'] > 21) & (df['mag_Zt'] < 22)
 
         df_sel = df.loc[base_selection].copy()
         del base_selection
