@@ -70,7 +70,7 @@ class AngularClustering:
 
         rr = treecorr.NNCorrelation(
             min_sep=self.min_sep, max_sep=self.max_sep,
-            nbins=self.nbins, sep_units=self.sep_units, 
+            nbins=self.nbins, sep_units=self.sep_units,
             var_method=self.var_method
         )
         rr.process(self.rand_cat)
@@ -101,8 +101,35 @@ class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None):
+                 results_directory=None,
+                 # ------------------------------------------------------------------ #
+                 # Mock catalog switch
+                 # ------------------------------------------------------------------ #
+                 use_mock=False,
+                 mock_data_filepath=None
+                 ):
+        """
+        Parameters
+        ----------
+        use_mock : bool
+            When True, the pipeline reads from mock catalogs instead of the
+            real WAVES-Wide photometric catalogues.  The mock data file must
+            contain the columns  ra, dec, mag_Z_VISTA, masked, ghosted.
+            The mock randoms file must contain  ra, dec, masked, ghosted.
+            North and south are split by  dec > mock_dec_split  (default −10°).
 
+        mock_data_filepath : str or None
+            Path to the (single) parquet file containing the combined mock
+            data for both fields.
+
+        mock_randoms_filepath : str or None
+            Path to the (single) parquet file containing the combined mock
+            randoms for both fields.
+        """
+
+        # ------------------------------------------------------------------ #
+        # Real-data file paths (ignored when use_mock=True)
+        # ------------------------------------------------------------------ #
         self.n_photom_filepath = n_photom_filepath
         self.s_photom_filepath = s_photom_filepath
 
@@ -115,13 +142,43 @@ class WavesWideClustering:
 
         self.results_directory = results_directory
 
+        # ------------------------------------------------------------------ #
+        # Mock catalog settings
+        # ------------------------------------------------------------------ #
+        self.use_mock = use_mock
+        self.mock_data_filepath = mock_data_filepath
+
+        # Declination boundary used to split the single mock file into north
+        # (dec > mock_dec_split) and south (dec <= mock_dec_split).
+        self.mock_dec_split = -10.0
+
+        # Column names in the mock catalogs
+        self.mock_ra_col      = 'ra'
+        self.mock_dec_col     = 'dec'
+        self.mock_mag_col     = 'mag_Z_VISTA'
+        self.mock_masked_col  = 'masked'   # combines starmask + polygon_mask
+        self.mock_ghosted_col = 'ghosted'
+
+        self.columns_to_load_mock_data    = [
+            self.mock_ra_col, self.mock_dec_col,
+            self.mock_mag_col, self.mock_masked_col, self.mock_ghosted_col,
+        ]
+        self.columns_to_load_mock_randoms = [
+            self.mock_ra_col, self.mock_dec_col,
+            self.mock_masked_col, self.mock_ghosted_col,
+        ]
+
+        # ------------------------------------------------------------------ #
         # Treecorr binning settings — shared by all AngularClustering instances
-        # and used when reconstructing an RR object from cache.
+        # ------------------------------------------------------------------ #
         self.min_sep   = 0.01
         self.max_sep   = 10
         self.nbins     = 50
         self.sep_units = 'degrees'
 
+        # ------------------------------------------------------------------ #
+        # Real-data column names
+        # ------------------------------------------------------------------ #
         self.data_ra_col = 'RAmax'
         self.data_dec_col = 'Decmax'
         self.randoms_ra_col = 'ra'
@@ -350,7 +407,7 @@ class WavesWideClustering:
             yield i, ra_data_strip, dec_data_strip, ra_rand_strip, dec_rand_strip
 
     # ---------------------------------------------------------------------- #
-    # Data loading
+    # Data loading — shared utilities
     # ---------------------------------------------------------------------- #
 
     def _get_extra_rec_masks(self, ra, dec):
@@ -368,7 +425,23 @@ class WavesWideClustering:
 
         return mask
 
+    # ---------------------------------------------------------------------- #
+    # Data loading — real catalogs
+    # ---------------------------------------------------------------------- #
+
     def _load_dataset(self, photom_filepath, stargal_filepath, selection):
+        """
+        Dispatch to the real or mock loader depending on self.use_mock.
+
+        When use_mock=True the photom_filepath / stargal_filepath arguments
+        are ignored and self.mock_data_filepath is used instead.
+        """
+        if self.use_mock:
+            return self._load_mock_dataset(self.mock_data_filepath, selection)
+        return self._load_real_dataset(photom_filepath, stargal_filepath, selection)
+
+    def _load_real_dataset(self, photom_filepath, stargal_filepath, selection):
+        """Load and filter a real WAVES-Wide photometric catalogue."""
         print(f"  Loading photometric data from {photom_filepath}...")
         df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
         print(f"  Loaded {len(df)} rows from photometric catalogue.")
@@ -458,6 +531,17 @@ class WavesWideClustering:
         return ra_data, dec_data
 
     def _load_randoms(self, randoms_filepath, selection):
+        """
+        Dispatch to the real or mock randoms loader depending on self.use_mock.
+
+        When use_mock=True the randoms_filepath argument is ignored and
+        self.mock_randoms_filepath is used instead.
+        """
+
+        return self._load_real_randoms(randoms_filepath, selection)
+
+    def _load_real_randoms(self, randoms_filepath, selection):
+        """Load and filter a real WAVES-Wide randoms catalogue."""
         print(f"  Loading randoms from {randoms_filepath} with selection {selection}...")
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
         print(f'Objects in catalog: {len(df)}')
@@ -496,20 +580,155 @@ class WavesWideClustering:
         del df_sel
         return ra_randoms, dec_randoms
 
+    # ---------------------------------------------------------------------- #
+    # Data loading — mock catalogs
+    # ---------------------------------------------------------------------- #
+
+    def _apply_mock_region_split(self, df, region):
+        """
+        Filter a mock DataFrame to the requested region by declination.
+
+        North  (WWN):  dec >  mock_dec_split  (default −10°)
+        South  (WWS):  dec <= mock_dec_split
+        Combined (WW combined): no filter applied.
+        """
+        if region == 'WWN':
+            df = df[df[self.mock_dec_col] > self.mock_dec_split].copy()
+            print(f"  Mock: kept {len(df)} rows with dec > {self.mock_dec_split} (WWN)")
+        elif region == 'WWS':
+            df = df[df[self.mock_dec_col] <= self.mock_dec_split].copy()
+            print(f"  Mock: kept {len(df)} rows with dec <= {self.mock_dec_split} (WWS)")
+        else:
+            # WW combined — no spatial cut needed
+            print(f"  Mock: using all {len(df)} rows (WW combined)")
+        return df
+
+    def _load_mock_dataset(self, mock_filepath, selection):
+        """
+        Load and filter a mock data catalogue.
+
+        Expected columns
+        ----------------
+        ra            : right ascension (degrees)
+        dec           : declination (degrees)
+        mag_Z_VISTA   : Z-band magnitude used for depth cuts
+        masked        : True if the object is masked (combines starmask +
+                        polygon / footprint mask)
+        ghosted       : True if the object is affected by a ghost artefact
+
+        North / south splitting
+        -----------------------
+        The mock file contains both fields.  Objects with dec > mock_dec_split
+        are assigned to WWN; those with dec <= mock_dec_split to WWS.
+
+        Star/galaxy separation
+        ----------------------
+        Mock catalogues do not carry a star/galaxy classification column.
+        The star_gal_method selection dimension is therefore ignored for mock
+        data (a warning is printed if it is set to something other than the
+        default).  The target_selection dimension is also ignored because the
+        mock is assumed to contain only the target object type (galaxies).
+        """
+        print(f"  [MOCK] Loading data from {mock_filepath}...")
+        df = pd.read_parquet(mock_filepath, columns=self.columns_to_load_mock_data)
+        print(f"  [MOCK] Loaded {len(df)} rows.")
+
+        # Warn if user expects star/galaxy classification that mock cannot provide
+        sgm = selection.get('star_gal_method', '')
+        if sgm not in ('', None):
+            print(
+                f"  [MOCK] WARNING: star_gal_method='{sgm}' is ignored for mock data "
+                f"(no star/galaxy column available)."
+            )
+        target = selection.get('target_selection', '')
+        if target not in ('galaxy', '', None):
+            print(
+                f"  [MOCK] WARNING: target_selection='{target}' is ignored for mock data "
+                f"(mock catalogue assumed to contain only the target type)."
+            )
+
+        # ------------------------------------------------------------------ #
+        # Diagnostics
+        # ------------------------------------------------------------------ #
+        print(f"  [MOCK] Total objects: {len(df)}")
+        print(f"  [MOCK] Objects in masked:  {df[self.mock_masked_col].sum()}")
+        print(f"  [MOCK] Objects in ghosted: {df[self.mock_ghosted_col].sum()}")
+
+        # ------------------------------------------------------------------ #
+        # Region split (N/S by declination)
+        # ------------------------------------------------------------------ #
+        df = self._apply_mock_region_split(df, selection['region'])
+
+        # ------------------------------------------------------------------ #
+        # Build selection mask
+        # ------------------------------------------------------------------ #
+        base_selection = df[self.mock_masked_col] == False
+
+        if selection['ghostmask_selection'] == 'with ghostmask':
+            base_selection &= df[self.mock_ghosted_col] == False
+
+        extra_rec_masks = self._get_extra_rec_masks(
+            df[self.mock_ra_col].to_numpy(), df[self.mock_dec_col].to_numpy()
+        )
+        base_selection &= extra_rec_masks
+
+        depth = selection['survey_depth']
+        if depth == 'Z<21.1':
+            base_selection &= df[self.mock_mag_col] < 21.1
+        elif depth == 'Z<21.25':
+            base_selection &= df[self.mock_mag_col] < 21.25
+        elif depth == 'Z<22':
+            base_selection &= df[self.mock_mag_col] < 22
+
+        df_sel = df.loc[base_selection].copy()
+        del base_selection, df
+
+        if len(df_sel) == 0:
+            raise ValueError(
+                f"[MOCK] Dataset is empty after applying selection: {selection}"
+            )
+
+        ra_data  = df_sel[self.mock_ra_col].to_numpy(copy=True)
+        dec_data = df_sel[self.mock_dec_col].to_numpy(copy=True)
+        del df_sel
+
+        print(f"  [MOCK] {len(ra_data)} objects retained after selection.")
+
+        if np.any(np.isnan(ra_data)) or np.any(np.isnan(dec_data)):
+            raise ValueError(
+                "[MOCK] NaN values found in ra/dec after applying selection. "
+                "Check mock catalogue."
+            )
+
+        return ra_data, dec_data
+
+    # ---------------------------------------------------------------------- #
+    # WW combined loaders
+    # ---------------------------------------------------------------------- #
+
     def _load_WWC_data(self, selection):
         """Load and concatenate north + south data for the WW combined region."""
-        ra_n, dec_n = self._load_dataset(
+        if self.use_mock:
+            # Mock file contains both regions — load once without splitting
+            print("  [MOCK] Loading combined mock data (no N/S split)...")
+            return self._load_mock_dataset(
+                self.mock_data_filepath,
+                dict(selection, region='WW combined')
+            )
+        # Real data: load N and S separately then concatenate
+        ra_n, dec_n = self._load_real_dataset(
             self.n_photom_filepath, self.n_stargal_filepath, selection
         )
-        ra_s, dec_s = self._load_dataset(
+        ra_s, dec_s = self._load_real_dataset(
             self.s_photom_filepath, self.s_stargal_filepath, selection
         )
         return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
 
     def _load_WWC_randoms(self, selection):
         """Load and concatenate north + south randoms for the WW combined region."""
-        ra_n, dec_n = self._load_randoms(self.n_randoms_filepath, selection)
-        ra_s, dec_s = self._load_randoms(self.s_randoms_filepath, selection)
+        # Real data: load N and S separately then concatenate
+        ra_n, dec_n = self._load_real_randoms(self.n_randoms_filepath, selection)
+        ra_s, dec_s = self._load_real_randoms(self.s_randoms_filepath, selection)
         return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
 
     # ---------------------------------------------------------------------- #
@@ -553,6 +772,8 @@ class WavesWideClustering:
         to a separate file.  Returns a list of result dicts (one per strip).
         """
         print(f"Running clustering for: {selection}")
+        if self.use_mock:
+            print("  [MOCK] Using mock catalog.")
 
         region = selection['region']
         if region == 'WW combined':
