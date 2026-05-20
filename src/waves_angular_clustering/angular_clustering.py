@@ -10,7 +10,7 @@ import itertools
 
 class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
-                 min_sep=0.01, max_sep=10, nbins=100, sep_units='degrees',
+                 min_sep=0.01, max_sep=10, nbins=30, sep_units='degrees',
                  cat_units='degrees', rand_units='degrees',
                  n_patch=20, var_method='jackknife'):
         self.ra_cat = ra_cat
@@ -121,7 +121,7 @@ class WavesWideClustering:
         # and used when reconstructing an RR object from cache.
         self.min_sep   = 0.01
         self.max_sep   = 10
-        self.nbins     = 50
+        self.nbins     = 30
         self.sep_units = 'degrees'
 
         self.data_ra_col = 'RAmax'
@@ -175,7 +175,10 @@ class WavesWideClustering:
             [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
             [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
             [[18.4, 18.5], [-31.80, -31.70]], # in south, ramin, ramax, decmin, decmax
-            [[157.25, 225], [-3.95, -3.5]] 
+            [[157.25, 225], [-3.95, -3.5]], 
+            [[201.8, 202], [-3.3, -3.1]], 
+            [[205.4, 205.5], [3.9, 3.95]], 
+            [[222, 222.2], [-2.6, -2.4]] 
         ]
         # Ive put in these extra masks as there are some iffy regions that may need additional masking.
         # for certain the 1st, and 3rd region here are needed. Need to check on the 
