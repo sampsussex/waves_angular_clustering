@@ -134,12 +134,18 @@ class WavesWideClustering:
         self.data_dec_col = 'Decmax'
         self.randoms_ra_col = 'ra'
         self.randoms_dec_col = 'dec'
-
-        self.columns_to_load_photom = [
-            'uberID', self.data_ra_col, self.data_dec_col,
-            'class', 'mag_Zt', 'mask', 'starmask', 'ghostmask',
-            'duplicate'
-        ]
+        if self.photom_type == 'total':
+            self.columns_to_load_photom = [
+                'uberID', self.data_ra_col, self.data_dec_col,
+                'class', 'mag_Zt', 'mask', 'starmask', 'ghostmask',
+                'duplicate'
+            ]
+        elif self.photom_type == 'colour':
+            self.columns_to_load_photom = [
+                'uberID', self.data_ra_col, self.data_dec_col,
+                'class', 'flux_ic', 'flux_Yc', 'flux_rc', 'flux_Zc',
+                'mask', 'starmask', 'ghostmask', 'duplicate'
+            ]
         self.columns_to_load_stargal = ['uberID', 'stargal']
         # NOTE: 'ghostmask' added here — it is used in _load_randoms but was
         # missing from the original columns list.
@@ -343,23 +349,25 @@ class WavesWideClustering:
                 base_selection &= (df['mag_Zt'] > 21) & (df['mag_Zt'] < 22)
 
         elif self.photom_type == 'colour':
+            print("using colour photometry for selection")
             # Convert colour-aperture fluxes to magnitudes.
             # Only compute magnitudes where flux is finite and positive.
+            print("  Converting colour fluxes to magnitudes for selection...")
             df['mag_ic'] = np.nan
             df['mag_Yc'] = np.nan
             df['mag_rc'] = np.nan
             df['mag_Zc'] = np.nan
-
+            print("checking is finite and positive for flux_ic, flux_Yc, flux_rc, flux_Zc")
             valid_i = np.isfinite(df['flux_ic']) & (df['flux_ic'] > 0)
             valid_Y = np.isfinite(df['flux_Yc']) & (df['flux_Yc'] > 0)
             valid_r = np.isfinite(df['flux_rc']) & (df['flux_rc'] > 0)
             valid_Z = np.isfinite(df['flux_Zc']) & (df['flux_Zc'] > 0)
-
+            print("  Converting fluxes to magnitudes where valid...")
             df.loc[valid_i, 'mag_ic'] = 8.9 - 2.5 * np.log10(df.loc[valid_i, 'flux_ic'])
             df.loc[valid_Y, 'mag_Yc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Y, 'flux_Yc'])
             df.loc[valid_r, 'mag_rc'] = 8.9 - 2.5 * np.log10(df.loc[valid_r, 'flux_rc'])
             df.loc[valid_Z, 'mag_Zc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Z, 'flux_Zc'])
-
+            print("  Estimating missing Z magnitudes where possible...")
             # If Z colour flux is missing, estimate Z from i and Y.
             use_iY = (~valid_Z) & valid_i & valid_Y
             df.loc[use_iY, 'mag_Zc'] = (
@@ -367,7 +375,7 @@ class WavesWideClustering:
                 - 0.4912 * (df.loc[use_iY, 'mag_ic'] - df.loc[use_iY, 'mag_Yc'])
                 - 0.0281
             )
-
+            print("  Estimating missing Z magnitudes from r and i where possible...")
             # If both Z and Y colour fluxes are missing, estimate Z from r and i.
             use_ri = (~valid_Z) & (~valid_Y) & valid_r & valid_i
             df.loc[use_ri, 'mag_Zc'] = (
@@ -376,6 +384,7 @@ class WavesWideClustering:
                 + 0.004
             )
 
+            print("  Applying depth selection...")
             if depth == 'Z<21.1':
                 base_selection &= df['mag_Zc'] < 21.1
             elif depth == 'Z<21.25':
@@ -394,6 +403,9 @@ class WavesWideClustering:
                 base_selection &= (df['mag_Zc'] > 20) & (df['mag_Zc'] < 21)
             elif depth == '21<Z<22':
                 base_selection &= (df['mag_Zc'] > 21) & (df['mag_Zc'] < 22)
+
+            print(f"  Applied colour-based selection with photom_type='{self.photom_type}'.")
+        print(f"  Number of objects after selection: {base_selection.sum()}")
         df_sel = df.loc[base_selection].copy()
         del base_selection
         del df  # free memory
