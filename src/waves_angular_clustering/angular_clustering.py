@@ -103,7 +103,7 @@ class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None):
+                 results_directory=None, photom_type = 'colour'):
 
         self.n_photom_filepath = n_photom_filepath
         self.s_photom_filepath = s_photom_filepath
@@ -116,6 +116,12 @@ class WavesWideClustering:
         self.randoms_realisation_to_load = [0, 1, 2, 3, 4]
 
         self.results_directory = results_directory
+
+        if photom_type not in ['total', 'colour']:
+            raise ValueError(f"Invalid photom_type: '{photom_type}'. Must be 'total' or 'colour'.")
+        
+        self.photom_type = photom_type
+
 
         # Treecorr binning settings — shared by all AngularClustering instances
         # and used when reconstructing an RR object from cache.
@@ -316,25 +322,78 @@ class WavesWideClustering:
             base_selection &= df['ghostmask'] == False
 
         depth = selection['survey_depth']
-        if depth == 'Z<21.1':
-            base_selection &= df['mag_Zt'] < 21.1
-        elif depth == 'Z<21.25':
-            base_selection &= df['mag_Zt'] < 21.25
-        elif depth == 'Z<22':
-            base_selection &= df['mag_Zt'] < 22
-        elif depth == '16<Z<17':
-            base_selection &= (df['mag_Zt'] > 16) & (df['mag_Zt'] < 17)
-        elif depth == '17<Z<18':
-            base_selection &= (df['mag_Zt'] > 17) & (df['mag_Zt'] < 18)
-        elif depth == '18<Z<19':
-            base_selection &= (df['mag_Zt'] > 18) & (df['mag_Zt'] < 19)
-        elif depth == '19<Z<20':
-            base_selection &= (df['mag_Zt'] > 19) & (df['mag_Zt'] < 20)
-        elif depth == '20<Z<21':
-            base_selection &= (df['mag_Zt'] > 20) & (df['mag_Zt'] < 21)
-        elif depth == '21<Z<22':
-            base_selection &= (df['mag_Zt'] > 21) & (df['mag_Zt'] < 22)
+        if self.photom_type == 'total':
+            if depth == 'Z<21.1':
+                base_selection &= df['mag_Zt'] < 21.1
+            elif depth == 'Z<21.25':
+                base_selection &= df['mag_Zt'] < 21.25
+            elif depth == 'Z<22':
+                base_selection &= df['mag_Zt'] < 22
+            elif depth == '16<Z<17':
+                base_selection &= (df['mag_Zt'] > 16) & (df['mag_Zt'] < 17)
+            elif depth == '17<Z<18':
+                base_selection &= (df['mag_Zt'] > 17) & (df['mag_Zt'] < 18)
+            elif depth == '18<Z<19':
+                base_selection &= (df['mag_Zt'] > 18) & (df['mag_Zt'] < 19)
+            elif depth == '19<Z<20':
+                base_selection &= (df['mag_Zt'] > 19) & (df['mag_Zt'] < 20)
+            elif depth == '20<Z<21':
+                base_selection &= (df['mag_Zt'] > 20) & (df['mag_Zt'] < 21)
+            elif depth == '21<Z<22':
+                base_selection &= (df['mag_Zt'] > 21) & (df['mag_Zt'] < 22)
 
+        elif self.photom_type == 'colour':
+            # Convert colour-aperture fluxes to magnitudes.
+            # Only compute magnitudes where flux is finite and positive.
+            df['mag_ic'] = np.nan
+            df['mag_Yc'] = np.nan
+            df['mag_rc'] = np.nan
+            df['mag_Zc'] = np.nan
+
+            valid_i = np.isfinite(df['flux_ic']) & (df['flux_ic'] > 0)
+            valid_Y = np.isfinite(df['flux_Yc']) & (df['flux_Yc'] > 0)
+            valid_r = np.isfinite(df['flux_rc']) & (df['flux_rc'] > 0)
+            valid_Z = np.isfinite(df['flux_Zc']) & (df['flux_Zc'] > 0)
+
+            df.loc[valid_i, 'mag_ic'] = 8.9 - 2.5 * np.log10(df.loc[valid_i, 'flux_ic'])
+            df.loc[valid_Y, 'mag_Yc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Y, 'flux_Yc'])
+            df.loc[valid_r, 'mag_rc'] = 8.9 - 2.5 * np.log10(df.loc[valid_r, 'flux_rc'])
+            df.loc[valid_Z, 'mag_Zc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Z, 'flux_Zc'])
+
+            # If Z colour flux is missing, estimate Z from i and Y.
+            use_iY = (~valid_Z) & valid_i & valid_Y
+            df.loc[use_iY, 'mag_Zc'] = (
+                df.loc[use_iY, 'mag_ic']
+                - 0.4912 * (df.loc[use_iY, 'mag_ic'] - df.loc[use_iY, 'mag_Yc'])
+                - 0.0281
+            )
+
+            # If both Z and Y colour fluxes are missing, estimate Z from r and i.
+            use_ri = (~valid_Z) & (~valid_Y) & valid_r & valid_i
+            df.loc[use_ri, 'mag_Zc'] = (
+                df.loc[use_ri, 'mag_ic']
+                - 0.7044 * (df.loc[use_ri, 'mag_rc'] - df.loc[use_ri, 'mag_ic'])
+                + 0.004
+            )
+
+            if depth == 'Z<21.1':
+                base_selection &= df['mag_Zc'] < 21.1
+            elif depth == 'Z<21.25':
+                base_selection &= df['mag_Zc'] < 21.25
+            elif depth == 'Z<22':
+                base_selection &= df['mag_Zc'] < 22
+            elif depth == '16<Z<17':
+                base_selection &= (df['mag_Zc'] > 16) & (df['mag_Zc'] < 17)
+            elif depth == '17<Z<18':
+                base_selection &= (df['mag_Zc'] > 17) & (df['mag_Zc'] < 18)
+            elif depth == '18<Z<19':
+                base_selection &= (df['mag_Zc'] > 18) & (df['mag_Zc'] < 19)
+            elif depth == '19<Z<20':
+                base_selection &= (df['mag_Zc'] > 19) & (df['mag_Zc'] < 20)
+            elif depth == '20<Z<21':
+                base_selection &= (df['mag_Zc'] > 20) & (df['mag_Zc'] < 21)
+            elif depth == '21<Z<22':
+                base_selection &= (df['mag_Zc'] > 21) & (df['mag_Zc'] < 22)
         df_sel = df.loc[base_selection].copy()
         del base_selection
         del df  # free memory
