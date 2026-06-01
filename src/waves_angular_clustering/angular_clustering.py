@@ -187,7 +187,7 @@ class WavesWideClustering:
             [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
             [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
             [[18.4, 18.5], [-31.80, -31.70]], # in south, ramin, ramax, decmin, decmax
-            [[157.25, 225], [-3.95, -3.5]], 
+            #[[157.25, 225], [-3.95, -3.5]], not using the large slab at the bottom for now
             [[201.8, 202], [-3.3, -3.1]], 
             [[205.4, 205.5], [3.9, 3.95]], 
             [[222, 222.2], [-2.6, -2.4]] 
