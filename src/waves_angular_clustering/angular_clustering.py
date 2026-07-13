@@ -124,8 +124,8 @@ class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None, photom_type = 'colour',
-                 additional_masking = False):
+                 results_directory=None, photom_type = 'total',
+                 additional_masking = True):
 
         self.n_photom_filepath = n_photom_filepath
         self.s_photom_filepath = s_photom_filepath
