@@ -1,10 +1,13 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import treecorr
-import pandas as pd
-import json
 import os
+import json
 import itertools
+import numpy as np
+import pandas as pd
+import treecorr
+import matplotlib.pyplot as plt
+from scipy.spatial import cKDTree
+from matplotlib.patches import Rectangle
+from matplotlib.collections import PatchCollection
 
 
 
@@ -12,7 +15,7 @@ class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
                  min_sep=0.01, max_sep=10, nbins=30, sep_units='degrees',
                  cat_units='degrees', rand_units='degrees',
-                 n_patch=20, var_method='jackknife'):
+                 n_patch=20, var_method='jackknife', ):
         self.ra_cat = ra_cat
         self.dec_cat = dec_cat
         self.ra_rand = ra_rand
@@ -99,11 +102,30 @@ class AngularClustering:
         del self.rand_cat
 
 
+"""
+WavesWideClustering
+--------------------
+Updated to add "additional masking" — removal of streak-artefact sources
+(and the matching randoms) identified via the difference between total-
+and colour-aperture Z-band photometry (mag_Zt - mag_Zc). Controlled by the
+`additional_masking` flag passed to __init__.
+
+Required imports (add these alongside your existing os/json/itertools/
+numpy/pandas/matplotlib imports):
+
+    from scipy.spatial import cKDTree
+    from matplotlib.patches import Rectangle
+    from matplotlib.collections import PatchCollection
+"""
+
+
+
 class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None, photom_type = 'colour'):
+                 results_directory=None, photom_type = 'colour',
+                 additional_masking = False):
 
         self.n_photom_filepath = n_photom_filepath
         self.s_photom_filepath = s_photom_filepath
@@ -130,22 +152,48 @@ class WavesWideClustering:
         self.nbins     = 30
         self.sep_units = 'degrees'
 
+        self.additional_masking = additional_masking
+
+        # ------------------------------------------------------------------ #
+        # Parameters for the additional 'streak' artefact masking (only used
+        # when additional_masking=True). Streaks arise where total-aperture
+        # photometry is artificially dilated relative to colour-aperture
+        # photometry, producing spatially clustered spurious detections.
+        # Sources (and randoms) that fall inside a box around a flagged
+        # 'streak candidate' position are removed.
+        # ------------------------------------------------------------------ #
+        self.streak_half_width_ra  = 0.1   # deg, half box width in RA
+        self.streak_half_width_dec = 0.1   # deg, half box width in Dec
+        self.streak_threshold      = 10    # neighbour count above which a region is flagged
+        self.streak_dmagZ_max      = -3    # mag_Zt - mag_Zc must be below this
+        self.streak_magZt_min      = 19.0
+        self.streak_magZt_max      = 21.25
+
         self.data_ra_col = 'RAmax'
         self.data_dec_col = 'Decmax'
         self.randoms_ra_col = 'ra'
         self.randoms_dec_col = 'dec'
-        if self.photom_type == 'total':
+        if additional_masking:
             self.columns_to_load_photom = [
                 'uberID', self.data_ra_col, self.data_dec_col,
-                'class', 'mag_Zt', 'mask', 'starmask', 'ghostmask',
-                'duplicate'
-            ]
-        elif self.photom_type == 'colour':
-            self.columns_to_load_photom = [
-                'uberID', self.data_ra_col, self.data_dec_col,
-                'class', 'flux_ic', 'flux_Yc', 'flux_rc', 'flux_Zc',
+                'class', 'mag_Zt', 'flux_ic', 'flux_Yc', 'flux_rc', 'flux_Zc',
                 'mask', 'starmask', 'ghostmask', 'duplicate'
             ]
+        else:
+            if self.photom_type == 'total':
+                self.columns_to_load_photom = [
+                    'uberID', self.data_ra_col, self.data_dec_col,
+                    'class', 'mag_Zt', 'mask', 'starmask', 'ghostmask',
+                    'duplicate'
+                ]
+            elif self.photom_type == 'colour':
+                self.columns_to_load_photom = [
+                    'uberID', self.data_ra_col, self.data_dec_col,
+                    'class', 'flux_ic', 'flux_Yc', 'flux_rc', 'flux_Zc',
+                    'mask', 'starmask', 'ghostmask', 'duplicate'
+                ]
+
+        
         self.columns_to_load_stargal = ['uberID', 'stargal']
         # NOTE: 'ghostmask' added here — it is used in _load_randoms but was
         # missing from the original columns list.
@@ -192,8 +240,8 @@ class WavesWideClustering:
             [[205.4, 205.5], [3.9, 3.95]], 
             [[222, 222.2], [-2.6, -2.4]] 
         ]
-        # Ive put in these extra masks as there are some iffy regions that may need additional masking.
-        # for certain the 1st, and 3rd region here are needed. Need to check on the 
+        # Ive put in these extra masks as there are some iffy regions that may need additional masking.
+        # for certain the 1st, and 3rd region here are needed. Need to check on the 
         # seg viewer that the others are justified. Perhaps also
         # the snugness of the masks might be causing some isses as well.
         # the ghostmasks may also be a bit too smug. I guess i need to go back to the
@@ -274,6 +322,135 @@ class WavesWideClustering:
 
         return mask
 
+    def _add_colour_magnitudes(self, df):
+        """
+        Convert colour-aperture fluxes to magnitudes (mag_ic, mag_Yc, mag_rc,
+        mag_Zc), estimating mag_Zc from neighbouring bands where the Z colour
+        flux itself is missing. Only computed where the underlying flux is
+        finite and positive. Used both for the 'colour' depth selection and
+        for the additional (streak) masking, which needs mag_Zc regardless
+        of photom_type.
+        """
+        print("  Converting colour fluxes to magnitudes...")
+        df['mag_ic'] = np.nan
+        df['mag_Yc'] = np.nan
+        df['mag_rc'] = np.nan
+        df['mag_Zc'] = np.nan
+        print("checking is finite and positive for flux_ic, flux_Yc, flux_rc, flux_Zc")
+        valid_i = np.isfinite(df['flux_ic']) & (df['flux_ic'] > 0)
+        valid_Y = np.isfinite(df['flux_Yc']) & (df['flux_Yc'] > 0)
+        valid_r = np.isfinite(df['flux_rc']) & (df['flux_rc'] > 0)
+        valid_Z = np.isfinite(df['flux_Zc']) & (df['flux_Zc'] > 0)
+        print("  Converting fluxes to magnitudes where valid...")
+        df.loc[valid_i, 'mag_ic'] = 8.9 - 2.5 * np.log10(df.loc[valid_i, 'flux_ic'])
+        df.loc[valid_Y, 'mag_Yc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Y, 'flux_Yc'])
+        df.loc[valid_r, 'mag_rc'] = 8.9 - 2.5 * np.log10(df.loc[valid_r, 'flux_rc'])
+        df.loc[valid_Z, 'mag_Zc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Z, 'flux_Zc'])
+        print("  Estimating missing Z magnitudes where possible...")
+        # If Z colour flux is missing, estimate Z from i and Y.
+        use_iY = (~valid_Z) & valid_i & valid_Y
+        df.loc[use_iY, 'mag_Zc'] = (
+            df.loc[use_iY, 'mag_ic']
+            - 0.4912 * (df.loc[use_iY, 'mag_ic'] - df.loc[use_iY, 'mag_Yc'])
+            - 0.0281
+        )
+        print("  Estimating missing Z magnitudes from r and i where possible...")
+        # If both Z and Y colour fluxes are missing, estimate Z from r and i.
+        use_ri = (~valid_Z) & (~valid_Y) & valid_r & valid_i
+        df.loc[use_ri, 'mag_Zc'] = (
+            df.loc[use_ri, 'mag_ic']
+            - 0.7044 * (df.loc[use_ri, 'mag_rc'] - df.loc[use_ri, 'mag_ic'])
+            + 0.004
+        )
+        return df
+
+    def _get_additional_mask(self, df):
+        """
+        Identify 'streak' artefacts using the total-vs-colour Z magnitude
+        difference (mag_Zt - mag_Zc), which flags sources whose photometric
+        apertures have been artificially dilated (e.g. by satellite/asteroid
+        streaks or similar image defects). A source is flagged as a streak
+        artefact if it lies within a small RA/Dec box of more than
+        `self.streak_threshold` other 'streak candidate' sources.
+
+        Returns
+        -------
+        keep_mask : boolean array, len(df) — True to keep, False to mask out
+        ra_streak_cand, dec_streak_cand : RA/Dec of the d_magZ-selected
+            'streak candidate' sources (used to also mask the randoms, and
+            for diagnostics)
+        is_streak_point : boolean array over the candidates, flagging which
+            candidates themselves sit in dense ('streak') regions (diagnostics only)
+        """
+        if 'mag_Zc' not in df.columns:
+            df = self._add_colour_magnitudes(df)
+
+        d_magZ = df['mag_Zt'] - df['mag_Zc']
+        sel = (
+            (d_magZ < self.streak_dmagZ_max) &
+            (df['mag_Zt'] < self.streak_magZt_max) &
+            (df['mag_Zt'] > self.streak_magZt_min)
+        )
+
+        ra_sel = df.loc[sel, self.data_ra_col].to_numpy()
+        dec_sel = df.loc[sel, self.data_dec_col].to_numpy()
+
+        if len(ra_sel) == 0:
+            # No streak candidates found — nothing to mask.
+            return np.ones(len(df), dtype=bool), ra_sel, dec_sel, np.zeros(0, dtype=bool)
+
+        # Scale coordinates so a box of +/- half_width becomes a unit
+        # Chebyshev ball, matching the diagnostic snippet's approach.
+        scaled_sel = np.column_stack([
+            ra_sel / self.streak_half_width_ra,
+            dec_sel / self.streak_half_width_dec,
+        ])
+        tree = cKDTree(scaled_sel)
+
+        counts_per_point = tree.query_ball_point(scaled_sel, r=1.0, p=np.inf, return_length=True)
+        is_streak_point = counts_per_point > self.streak_threshold
+
+        ra_all = df[self.data_ra_col].to_numpy()
+        dec_all = df[self.data_dec_col].to_numpy()
+        scaled_all = np.column_stack([
+            ra_all / self.streak_half_width_ra,
+            dec_all / self.streak_half_width_dec,
+        ])
+        counts_all = tree.query_ball_point(scaled_all, r=1.0, p=np.inf, return_length=True)
+        streak_mask = counts_all > self.streak_threshold
+
+        keep_mask = ~streak_mask
+
+        return keep_mask, ra_sel, dec_sel, is_streak_point
+
+    def _apply_additional_mask_to_points(self, ra, dec, ra_streak_cand, dec_streak_cand):
+        """
+        Apply the same streak exclusion (built from the data catalogue's
+        d_magZ candidate positions) to an arbitrary set of RA/Dec points.
+        Used to mask the randoms catalogue in the same way as the data,
+        since the randoms have no photometry of their own to derive
+        mag_Zt/mag_Zc from.
+        """
+        ra = np.asarray(ra)
+        dec = np.asarray(dec)
+
+        if ra_streak_cand is None or len(ra_streak_cand) == 0:
+            return np.ones(len(ra), dtype=bool)
+
+        scaled_cand = np.column_stack([
+            np.asarray(ra_streak_cand) / self.streak_half_width_ra,
+            np.asarray(dec_streak_cand) / self.streak_half_width_dec,
+        ])
+        tree = cKDTree(scaled_cand)
+
+        scaled_points = np.column_stack([
+            ra / self.streak_half_width_ra,
+            dec / self.streak_half_width_dec,
+        ])
+        counts = tree.query_ball_point(scaled_points, r=1.0, p=np.inf, return_length=True)
+
+        return counts <= self.streak_threshold
+
     def _load_dataset(self, photom_filepath, stargal_filepath, selection):
         print(f"  Loading photometric data from {photom_filepath}...")
         df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
@@ -305,6 +482,25 @@ class WavesWideClustering:
             df['stargal'] = df['class']
 
         # ------------------------------------------------------------------ #
+        # Additional masking (streak-artefact removal)
+        # ------------------------------------------------------------------ #
+        # Computed here (rather than inside the depth-selection branch below)
+        # because it needs mag_Zt/mag_Zc regardless of self.photom_type, and
+        # because the resulting candidate positions are also needed to mask
+        # the randoms catalogue for this selection.
+        ra_streak_cand = np.array([])
+        dec_streak_cand = np.array([])
+        additional_keep_mask = None
+
+        if self.additional_masking:
+            print("  Computing additional (streak) mask...")
+            df = self._add_colour_magnitudes(df)
+            additional_keep_mask, ra_streak_cand, dec_streak_cand, is_streak_point = self._get_additional_mask(df)
+            n_flagged = (~additional_keep_mask).sum()
+            print(f"  Additional masking flags {n_flagged} / {len(df)} sources as streak artefacts.")
+            self.plot_streak_mask(ra_streak_cand, dec_streak_cand, is_streak_point, selection)
+
+        # ------------------------------------------------------------------ #
         # Build selection mask
         # ------------------------------------------------------------------ #
         base_selection = (
@@ -315,6 +511,9 @@ class WavesWideClustering:
         extra_rec_masks = self._get_extra_rec_masks(df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy())
 
         base_selection &= extra_rec_masks
+
+        if self.additional_masking:
+            base_selection &= additional_keep_mask
 
         target = selection['target_selection']
         if target == 'galaxy':
@@ -350,39 +549,10 @@ class WavesWideClustering:
 
         elif self.photom_type == 'colour':
             print("using colour photometry for selection")
-            # Convert colour-aperture fluxes to magnitudes.
-            # Only compute magnitudes where flux is finite and positive.
-            print("  Converting colour fluxes to magnitudes for selection...")
-            df['mag_ic'] = np.nan
-            df['mag_Yc'] = np.nan
-            df['mag_rc'] = np.nan
-            df['mag_Zc'] = np.nan
-            print("checking is finite and positive for flux_ic, flux_Yc, flux_rc, flux_Zc")
-            valid_i = np.isfinite(df['flux_ic']) & (df['flux_ic'] > 0)
-            valid_Y = np.isfinite(df['flux_Yc']) & (df['flux_Yc'] > 0)
-            valid_r = np.isfinite(df['flux_rc']) & (df['flux_rc'] > 0)
-            valid_Z = np.isfinite(df['flux_Zc']) & (df['flux_Zc'] > 0)
-            print("  Converting fluxes to magnitudes where valid...")
-            df.loc[valid_i, 'mag_ic'] = 8.9 - 2.5 * np.log10(df.loc[valid_i, 'flux_ic'])
-            df.loc[valid_Y, 'mag_Yc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Y, 'flux_Yc'])
-            df.loc[valid_r, 'mag_rc'] = 8.9 - 2.5 * np.log10(df.loc[valid_r, 'flux_rc'])
-            df.loc[valid_Z, 'mag_Zc'] = 8.9 - 2.5 * np.log10(df.loc[valid_Z, 'flux_Zc'])
-            print("  Estimating missing Z magnitudes where possible...")
-            # If Z colour flux is missing, estimate Z from i and Y.
-            use_iY = (~valid_Z) & valid_i & valid_Y
-            df.loc[use_iY, 'mag_Zc'] = (
-                df.loc[use_iY, 'mag_ic']
-                - 0.4912 * (df.loc[use_iY, 'mag_ic'] - df.loc[use_iY, 'mag_Yc'])
-                - 0.0281
-            )
-            print("  Estimating missing Z magnitudes from r and i where possible...")
-            # If both Z and Y colour fluxes are missing, estimate Z from r and i.
-            use_ri = (~valid_Z) & (~valid_Y) & valid_r & valid_i
-            df.loc[use_ri, 'mag_Zc'] = (
-                df.loc[use_ri, 'mag_ic']
-                - 0.7044 * (df.loc[use_ri, 'mag_rc'] - df.loc[use_ri, 'mag_ic'])
-                + 0.004
-            )
+            # Convert colour-aperture fluxes to magnitudes (skip if already
+            # computed above for additional masking).
+            if 'mag_Zc' not in df.columns:
+                df = self._add_colour_magnitudes(df)
 
             print("  Applying depth selection...")
             if depth == 'Z<21.1':
@@ -425,9 +595,9 @@ class WavesWideClustering:
                 "Check input catalogue."
             )
 
-        return ra_data, dec_data
+        return ra_data, dec_data, ra_streak_cand, dec_streak_cand
 
-    def _load_randoms(self, randoms_filepath, selection):
+    def _load_randoms(self, randoms_filepath, selection, ra_streak_cand=None, dec_streak_cand=None):
         print(f"  Loading randoms from {randoms_filepath} with selection {selection}...")
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
 
@@ -442,6 +612,18 @@ class WavesWideClustering:
 
         if selection['ghostmask_selection'] == 'with ghostmask':
             base_selection &= df['ghostmask'] == False
+
+        if self.additional_masking:
+            print("  Applying additional (streak) mask to randoms...")
+            additional_keep_mask = self._apply_additional_mask_to_points(
+                df[self.randoms_ra_col].to_numpy(),
+                df[self.randoms_dec_col].to_numpy(),
+                ra_streak_cand,
+                dec_streak_cand,
+            )
+            n_flagged = (~additional_keep_mask).sum()
+            print(f"  Additional masking flags {n_flagged} / {len(df)} random points as streak artefacts.")
+            base_selection &= additional_keep_mask
 
         df_sel = df.loc[base_selection].copy()
         del df
@@ -458,18 +640,25 @@ class WavesWideClustering:
 
     def _load_WWC_data(self, selection):
         """Load and concatenate north + south data for the WW combined region."""
-        ra_n, dec_n = self._load_dataset(
+        ra_n, dec_n, ra_streak_n, dec_streak_n = self._load_dataset(
             self.n_photom_filepath, self.n_stargal_filepath, selection
         )
-        ra_s, dec_s = self._load_dataset(
+        ra_s, dec_s, ra_streak_s, dec_streak_s = self._load_dataset(
             self.s_photom_filepath, self.s_stargal_filepath, selection
         )
-        return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
+        ra_streak_cand = np.concatenate([ra_streak_n, ra_streak_s])
+        dec_streak_cand = np.concatenate([dec_streak_n, dec_streak_s])
+        return (
+            np.concatenate([ra_n, ra_s]),
+            np.concatenate([dec_n, dec_s]),
+            ra_streak_cand,
+            dec_streak_cand,
+        )
 
-    def _load_WWC_randoms(self, selection):
+    def _load_WWC_randoms(self, selection, ra_streak_cand=None, dec_streak_cand=None):
         """Load and concatenate north + south randoms for the WW combined region."""
-        ra_n, dec_n = self._load_randoms(self.n_randoms_filepath, selection)
-        ra_s, dec_s = self._load_randoms(self.s_randoms_filepath, selection)
+        ra_n, dec_n = self._load_randoms(self.n_randoms_filepath, selection, ra_streak_cand, dec_streak_cand)
+        ra_s, dec_s = self._load_randoms(self.s_randoms_filepath, selection, ra_streak_cand, dec_streak_cand)
         return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
 
     # ---------------------------------------------------------------------- #
@@ -512,14 +701,14 @@ class WavesWideClustering:
         region = selection['region']
         if region == 'WW combined':
             print("  Loading and concatenating north + south data for WW combined region...")
-            ra_data, dec_data = self._load_WWC_data(selection)
-            ra_rand, dec_rand = self._load_WWC_randoms(selection)
+            ra_data, dec_data, ra_streak_cand, dec_streak_cand = self._load_WWC_data(selection)
+            ra_rand, dec_rand = self._load_WWC_randoms(selection, ra_streak_cand, dec_streak_cand)
             print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms for WW combined.")
         else:
             print("  Loading data and randoms...")
             photom_fp, stargal_fp, randoms_fp = self._get_filepaths_for_selection(selection)
-            ra_data, dec_data = self._load_dataset(photom_fp, stargal_fp, selection)
-            ra_rand, dec_rand = self._load_randoms(randoms_fp, selection)
+            ra_data, dec_data, ra_streak_cand, dec_streak_cand = self._load_dataset(photom_fp, stargal_fp, selection)
+            ra_rand, dec_rand = self._load_randoms(randoms_fp, selection, ra_streak_cand, dec_streak_cand)
             print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms.")
 
         self._diagnose_catalog("Data and Randoms", ra_data, dec_data, ra_rand, dec_rand)
@@ -849,6 +1038,54 @@ class WavesWideClustering:
         print(f"  Saved density diagnostic to {save_path}")
 
 
+    def plot_streak_mask(self, ra_streak_cand, dec_streak_cand, is_streak_point, selection):
+        """
+        Save-only diagnostic: shows the RA/Dec footprint of the d_magZ-selected
+        'streak candidate' sources, with points flagged as being in a dense
+        ('streak') region drawn as red exclusion boxes and kept points shown
+        as grey scatter — matching the plot_mask_boxes() diagnostic.
+        """
+        if len(ra_streak_cand) == 0:
+            print("  No streak-candidate sources found; skipping streak mask diagnostic plot.")
+            return
+
+        save_path = self._get_diagnostic_plot_path(selection, "streak_mask")
+
+        ra_flagged = ra_streak_cand[is_streak_point]
+        dec_flagged = dec_streak_cand[is_streak_point]
+        ra_kept = ra_streak_cand[~is_streak_point]
+        dec_kept = dec_streak_cand[~is_streak_point]
+
+        fig, ax = plt.subplots(figsize=(30, 4))
+
+        ax.scatter(ra_kept, dec_kept, s=1, alpha=0.2, color='gray', label='kept', zorder=1)
+
+        if len(ra_flagged) > 0:
+            boxes = [
+                Rectangle(
+                    (ra - self.streak_half_width_ra, dec - self.streak_half_width_dec),
+                    2 * self.streak_half_width_ra, 2 * self.streak_half_width_dec
+                )
+                for ra, dec in zip(ra_flagged, dec_flagged)
+            ]
+            pc = PatchCollection(boxes, facecolor='red', edgecolor='none', alpha=0.3, zorder=2)
+            ax.add_collection(pc)
+
+            ax.set_xlim(ra_flagged.min() - 5 * self.streak_half_width_ra, ra_flagged.max() + 5 * self.streak_half_width_ra)
+            ax.set_ylim(dec_flagged.min() - 5 * self.streak_half_width_dec, dec_flagged.max() + 5 * self.streak_half_width_dec)
+
+        ax.set_aspect('equal')
+        ax.set_xlabel('RA')
+        ax.set_ylabel('Dec')
+        ax.set_title('Additional (streak) masked footprint')
+        ax.legend(markerscale=10)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Saved streak mask diagnostic to {save_path}")
+
+
     def plot_dd_dr_rr(self, dd, dr, rr, selection):
         """
         Plot and save DD, DR, RR pair counts (weight and npairs) as a function
@@ -912,6 +1149,80 @@ class WavesWideClustering:
         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved DD/DR/RR diagnostic plot to {plot_path}")
+
+# --------------------------------------------------------------------------- #
+# Plotting
+# --------------------------------------------------------------------------- #
+
+# Colour keyed on target_selection value
+_COLOUR_BY_TARGET = {
+    'star':               'red',
+    'galaxy':             'blue',
+    'galaxy/ambiguous':   'green',
+}
+_DEFAULT_COLOUR = 'grey'   # fallback for unrecognised target_selection values
+
+# Line style keyed on star_gal_method value
+_LINESTYLE_BY_METHOD = {
+    'TOPZ/SFM/R50': '-',    # solid
+    'baseline':     '--',   # dashed
+    'UMAP':         ':',    # double-dashed (dotted)
+}
+_DEFAULT_LINESTYLE = '-'    # fallback
+
+
+def _colour_for(selection: dict) -> str:
+    target = selection.get('target_selection', '')
+    return _COLOUR_BY_TARGET.get(target, _DEFAULT_COLOUR)
+
+
+def _linestyle_for(selection: dict) -> str:
+    method = selection.get('star_gal_method', '')
+    return _LINESTYLE_BY_METHOD.get(method, _DEFAULT_LINESTYLE)
+
+
+def _label_for(selection: dict, title_keys: set) -> str:
+    """
+    Build a legend label from *selection*, omitting:
+      - keys whose value appears in title_keys (already shown in the panel title)
+      - keys whose value is None
+
+    Only the VALUES are shown (no 'key=' prefix).
+    """
+    parts = [
+        str(v)
+        for k, v in selection.items()
+        if v is not None and str(v) not in title_keys
+    ]
+    return ', '.join(parts) if parts else 'default'
+
+
+def _build_panel_title(panel_results: list) -> tuple[str, set]:
+    """
+    For a list of result dicts sharing a panel, identify which keys have only a
+    single unique value across all results.  Those values go into the panel
+    title (as bare values, no key names).  Returns (title_string, title_value_set).
+    """
+    if not panel_results:
+        return '', set()
+
+    # Collect all unique values per key across every result on this panel
+    from collections import defaultdict
+    values_per_key = defaultdict(set)
+    for r in panel_results:
+        for k, v in r.get('selection', {}).items():
+            if v is not None:
+                values_per_key[k].add(str(v))
+
+    # Keys with exactly one unique value → go in the title
+    title_parts = [
+        next(iter(vals))
+        for vals in values_per_key.values()
+        if len(vals) == 1
+    ]
+    title_value_set = set(title_parts)
+    title = ', '.join(title_parts)
+    return title, title_value_set
 
 # --------------------------------------------------------------------------- #
 # Plotting
