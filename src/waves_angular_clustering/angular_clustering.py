@@ -102,30 +102,12 @@ class AngularClustering:
         del self.rand_cat
 
 
-"""
-WavesWideClustering
---------------------
-Updated to add "additional masking" — removal of streak-artefact sources
-(and the matching randoms) identified via the difference between total-
-and colour-aperture Z-band photometry (mag_Zt - mag_Zc). Controlled by the
-`additional_masking` flag passed to __init__.
-
-Required imports (add these alongside your existing os/json/itertools/
-numpy/pandas/matplotlib imports):
-
-    from scipy.spatial import cKDTree
-    from matplotlib.patches import Rectangle
-    from matplotlib.collections import PatchCollection
-"""
-
-
-
 class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None, photom_type = 'total',
-                 additional_masking = True):
+                 results_directory=None, photom_type = 'colour',
+                 additional_masking = False):
 
         self.n_photom_filepath = n_photom_filepath
         self.s_photom_filepath = s_photom_filepath
@@ -350,7 +332,7 @@ class WavesWideClustering:
         # If Z colour flux is missing, estimate Z from i and Y.
         use_iY = (~valid_Z) & valid_i & valid_Y
         df.loc[use_iY, 'mag_Zc'] = (
-            df.loc[use_iY, 'mag_ic']
+            df.loc[use_iY, 'mag_Yc']
             - 0.4912 * (df.loc[use_iY, 'mag_ic'] - df.loc[use_iY, 'mag_Yc'])
             - 0.0281
         )
@@ -385,8 +367,21 @@ class WavesWideClustering:
         if 'mag_Zc' not in df.columns:
             df = self._add_colour_magnitudes(df)
 
+        # Only search for streak candidates among sources that are already
+        # 'clean' — i.e. not masked, not star-masked, not duplicates, and
+        # not flagged as artefacts by the pipeline's own 'class' column.
+        # This keeps the d_magZ streak search from being contaminated by
+        # sources that would be cut for other reasons anyway.
+        clean_selection = (
+            (df['mask'] == False) &
+            (df['starmask'] == False) &
+            (df['duplicate'] == False) &
+            (df['class'] != 'artefact')
+        )
+
         d_magZ = df['mag_Zt'] - df['mag_Zc']
         sel = (
+            clean_selection &
             (d_magZ < self.streak_dmagZ_max) &
             (df['mag_Zt'] < self.streak_magZt_max) &
             (df['mag_Zt'] > self.streak_magZt_min)
@@ -1149,80 +1144,6 @@ class WavesWideClustering:
         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved DD/DR/RR diagnostic plot to {plot_path}")
-
-# --------------------------------------------------------------------------- #
-# Plotting
-# --------------------------------------------------------------------------- #
-
-# Colour keyed on target_selection value
-_COLOUR_BY_TARGET = {
-    'star':               'red',
-    'galaxy':             'blue',
-    'galaxy/ambiguous':   'green',
-}
-_DEFAULT_COLOUR = 'grey'   # fallback for unrecognised target_selection values
-
-# Line style keyed on star_gal_method value
-_LINESTYLE_BY_METHOD = {
-    'TOPZ/SFM/R50': '-',    # solid
-    'baseline':     '--',   # dashed
-    'UMAP':         ':',    # double-dashed (dotted)
-}
-_DEFAULT_LINESTYLE = '-'    # fallback
-
-
-def _colour_for(selection: dict) -> str:
-    target = selection.get('target_selection', '')
-    return _COLOUR_BY_TARGET.get(target, _DEFAULT_COLOUR)
-
-
-def _linestyle_for(selection: dict) -> str:
-    method = selection.get('star_gal_method', '')
-    return _LINESTYLE_BY_METHOD.get(method, _DEFAULT_LINESTYLE)
-
-
-def _label_for(selection: dict, title_keys: set) -> str:
-    """
-    Build a legend label from *selection*, omitting:
-      - keys whose value appears in title_keys (already shown in the panel title)
-      - keys whose value is None
-
-    Only the VALUES are shown (no 'key=' prefix).
-    """
-    parts = [
-        str(v)
-        for k, v in selection.items()
-        if v is not None and str(v) not in title_keys
-    ]
-    return ', '.join(parts) if parts else 'default'
-
-
-def _build_panel_title(panel_results: list) -> tuple[str, set]:
-    """
-    For a list of result dicts sharing a panel, identify which keys have only a
-    single unique value across all results.  Those values go into the panel
-    title (as bare values, no key names).  Returns (title_string, title_value_set).
-    """
-    if not panel_results:
-        return '', set()
-
-    # Collect all unique values per key across every result on this panel
-    from collections import defaultdict
-    values_per_key = defaultdict(set)
-    for r in panel_results:
-        for k, v in r.get('selection', {}).items():
-            if v is not None:
-                values_per_key[k].add(str(v))
-
-    # Keys with exactly one unique value → go in the title
-    title_parts = [
-        next(iter(vals))
-        for vals in values_per_key.values()
-        if len(vals) == 1
-    ]
-    title_value_set = set(title_parts)
-    title = ', '.join(title_parts)
-    return title, title_value_set
 
 # --------------------------------------------------------------------------- #
 # Plotting
