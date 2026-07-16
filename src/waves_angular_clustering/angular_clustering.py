@@ -146,7 +146,7 @@ class WavesWideClustering:
         # ------------------------------------------------------------------ #
         self.streak_half_width_ra  = 0.1   # deg, half box width in RA
         self.streak_half_width_dec = 0.1   # deg, half box width in Dec
-        self.streak_threshold      = 10    # neighbour count above which a region is flagged
+        self.streak_threshold      = 5    # neighbour count above which a region is flagged
         self.streak_dmagZ_max      = -3    # mag_Zt - mag_Zc must be below this
         self.streak_magZt_min      = 19.0
         self.streak_magZt_max      = 21.25
