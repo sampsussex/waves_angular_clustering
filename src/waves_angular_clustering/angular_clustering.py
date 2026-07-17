@@ -117,7 +117,7 @@ class WavesWideClustering:
 
         self.n_randoms_filepath = n_randoms_filepath
         self.s_randoms_filepath = s_randoms_filepath
-        self.randoms_realisation_to_load = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]  # list of randoms realisations to load for each region
+        self.randoms_realisation_to_load = [0, 1, 2, 3, 4]  # list of randoms realisations to load for each region
 
         self.results_directory = results_directory
 
@@ -190,7 +190,7 @@ class WavesWideClustering:
         # NOTE: unified naming — was 'TOPZ+SFM' in possible_selections but
         # 'TOPZ/SFM/R50' in selections_to_run. Standardised to 'TOPZ/SFM/R50'.
         self.possible_selections = {
-            'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star'],
+            'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star', 'ambiguous'],
             'ghostmask_selection':['no ghostmask', 'with ghostmask'],
             'survey_depth':       ['Z<21.1', 'Z<21.25', 'Z<22',
                                    '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
@@ -200,10 +200,10 @@ class WavesWideClustering:
 
         selections_to_run = {
             'target_selection':   ['galaxy'],
-            'ghostmask_selection':['with ghostmask'],
-            'survey_depth':       ['16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
+            'ghostmask_selection':['no ghostmask', 'with ghostmask'],
+            'survey_depth':       ['Z<21.1', '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50'],
-            'region':             ['WWN', 'WWS'],
+            'region':             ['WWN'],
         }
 
         self._validate_selections(selections_to_run)
@@ -217,7 +217,7 @@ class WavesWideClustering:
             [[215.4, 215.5], [3.7, 3.95]], # in north, ramin, ramax, decmin, decmax
             [[17.85, 17.95], [-30.15, -30.05]], # in south, ramin, ramax, decmin, decmax
             [[18.4, 18.5], [-31.80, -31.70]], # in south, ramin, ramax, decmin, decmax
-            [[157.25, 225], [-3.95, -3.5]], # the large slab at the bottom of Wwn
+            #[[157.25, 225], [-3.95, -3.5]], # the large slab at the bottom of Wwn
             [[201.8, 202], [-3.3, -3.1]], 
             [[205.4, 205.5], [3.9, 3.95]], 
             [[222, 222.2], [-2.6, -2.4]] 
@@ -458,6 +458,9 @@ class WavesWideClustering:
         # Initialise stargal column to NaN so the base_selection mask works
         # correctly even for rows that don't match the chosen method.
         df['stargal'] = np.nan
+
+        # ensure artefacts are removed
+        df = df[df['class'] != 'artefact']
 
         if selection['star_gal_method'] == 'TOPZ/SFM/R50':
             print(f"  Loading stargal classification from {stargal_filepath}...")
