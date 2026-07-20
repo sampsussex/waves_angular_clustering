@@ -199,10 +199,10 @@ class WavesWideClustering:
         }
 
         selections_to_run = {
-            'target_selection':   ['galaxy'],
-            'ghostmask_selection':['no ghostmask', 'with ghostmask'],
+            'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star', 'ambiguous'],
+            'ghostmask_selection':['with ghostmask'],
             'survey_depth':       ['Z<21.1'],
-            'star_gal_method':    ['TOPZ/SFM/R50'],
+            'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
             'region':             ['WWN', 'WWS'],
         }
 
