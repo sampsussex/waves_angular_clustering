@@ -106,7 +106,7 @@ class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None, photom_type = 'total',
+                 results_directory=None, photom_type = 'colour',
                  additional_masking = False):
 
         self.n_photom_filepath = n_photom_filepath
@@ -198,11 +198,18 @@ class WavesWideClustering:
             'region':             ['WWN', 'WWS', 'WW combined'],
         }
 
+        #selections_to_run = {
+        #    'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star', 'ambiguous'],
+        #    'ghostmask_selection':['with ghostmask'],
+        #    'survey_depth':       ['Z<21.1'],
+        #    'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
+        #    'region':             ['WWN', 'WWS'],
+        #}
         selections_to_run = {
-            'target_selection':   ['galaxy', 'galaxy/ambiguous', 'star', 'ambiguous'],
+            'target_selection':   ['galaxy'],
             'ghostmask_selection':['with ghostmask'],
-            'survey_depth':       ['Z<21.1'],
-            'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
+            'survey_depth':       ['16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22'],
+            'star_gal_method':    ['TOPZ/SFM/R50'],
             'region':             ['WWN', 'WWS'],
         }
 
@@ -1152,21 +1159,33 @@ class WavesWideClustering:
 # Plotting
 # --------------------------------------------------------------------------- #
 
-# Colour keyed on target_selection value
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+from scipy.optimize import curve_fit
+
 _COLOUR_BY_TARGET = {
     'star':               'red',
     'galaxy':             'blue',
     'galaxy/ambiguous':   'green',
 }
-_DEFAULT_COLOUR = 'grey'   # fallback for unrecognised target_selection values
+_DEFAULT_COLOUR = 'grey'
 
-# Line style keyed on star_gal_method value
 _LINESTYLE_BY_METHOD = {
-    'TOPZ/SFM/R50': '-',    # solid
-    'baseline':     '--',   # dashed
-    'UMAP':         ':',    # double-dashed (dotted)
+    'TOPZ/SFM/R50': '-',
+    'baseline':     '--',
+    'UMAP':         ':',
 }
-_DEFAULT_LINESTYLE = '-'    # fallback
+_DEFAULT_LINESTYLE = '-'
+
+_STRIP_CMAP = cm.rainbow  # or cm.hsv
+
+
+def _colour_for_strip(ra_strip) -> str:
+    """Map strip 0-9 to a rainbow colour."""
+    norm = mcolors.Normalize(vmin=0, vmax=9)
+    return _STRIP_CMAP(norm(int(ra_strip)))
 
 
 def _colour_for(selection: dict) -> str:
@@ -1180,18 +1199,11 @@ def _linestyle_for(selection: dict) -> str:
 
 
 def _label_for(selection: dict, title_keys: set) -> str:
-    """
-    Build a legend label from *selection*, omitting:
-      - keys whose value appears in title_keys (already shown in the panel title)
-      - keys whose value is None
-
-    Only the VALUES are shown (no 'key=' prefix).
-    """
-    parts = [
-        str(v)
-        for k, v in selection.items()
-        if v is not None and str(v) not in title_keys
-    ]
+    parts = []
+    for k, v in selection.items():
+        if v is None or str(v) in title_keys:
+            continue
+        parts.append(f"strip {v}" if k == 'ra_strip' else str(v))
     return ', '.join(parts) if parts else 'default'
 
 
@@ -1204,15 +1216,13 @@ def _build_panel_title(panel_results: list) -> tuple[str, set]:
     if not panel_results:
         return '', set()
 
-    # Collect all unique values per key across every result on this panel
     from collections import defaultdict
     values_per_key = defaultdict(set)
     for r in panel_results:
         for k, v in r.get('selection', {}).items():
-            if v is not None:
+            if v is not None and k != 'ra_strip':
                 values_per_key[k].add(str(v))
 
-    # Keys with exactly one unique value → go in the title
     title_parts = [
         next(iter(vals))
         for vals in values_per_key.values()
@@ -1223,8 +1233,26 @@ def _build_panel_title(panel_results: list) -> tuple[str, set]:
     return title, title_value_set
 
 
+def _selection_sort_key(result: dict) -> tuple:
+    """
+    Deterministic sort key built purely from the *contents* of the selection
+    dict (sorted alphabetically by key name, then stringified).  This makes
+    the plotting order depend only on the selection values themselves, not on
+    whatever order the results happened to arrive in / get matched in - which
+    is what was causing the "WWN sometimes first, sometimes second" ordering
+    problem.
+    """
+    sel = result.get('selection', {})
+    return tuple(sorted((str(k), str(v)) for k, v in sel.items()))
+
+
+def _line(x, m, c):
+    return m * x + c
+
+
 class AngularClusteringPlots:
-    def __init__(self, clustering_results, num_panels, save_location=None, log_scale=True):
+    def __init__(self, clustering_results, num_panels, save_location=None,
+                 log_scale=True, plot_fit=False, fit_max_theta=0.9):
         """
         Parameters
         ----------
@@ -1237,15 +1265,30 @@ class AngularClusteringPlots:
             If given, the figure is saved here instead of shown.
         log_scale : bool
             Whether to use a logarithmic scale for the x and y-axis.
+        plot_fit : bool
+            If True, fit a straight line (power law) to log(xi) vs log(theta)
+            for each curve, overplot the fit, and record the fitted slope /
+            gamma. Fitting is done in log-log space (matching the underlying
+            data storage), and the resulting fit line is transformed back
+            into linear r/xi space so it can be drawn on the existing axes
+            (which are log-scaled, so it still looks like a straight line).
+        fit_max_theta : float
+            Only points with theta < fit_max_theta [degrees] are used in the
+            fit (mirrors the r < np.log(0.9) cut in the original fitting
+            script).
         """
         self.clustering_results = clustering_results
         self.save_location = save_location
         self.num_panels = num_panels
         self.log_scale = log_scale
+        self.plot_fit = plot_fit
+        self.fit_max_theta = fit_max_theta
 
-        # selections_per_panel maps panel index -> list of result dicts to plot.
-        # Populated via assign_results_to_panel().
         self.selections_per_panel = {panel: [] for panel in range(num_panels)}
+
+        # Populated by plot_correlation_figure / _plot_correlation_function_subplot.
+        # Structure: {panel_index: [ {selection, m, m_err, c, gamma} , ... ] }
+        self.fit_results = {panel: [] for panel in range(num_panels)}
 
     def assign_results_to_panel(self, panel_index, selection_filters):
         """
@@ -1263,11 +1306,6 @@ class AngularClusteringPlots:
         ----------
         panel_index : int
         selection_filters : dict
-            e.g. {
-                'target_selection':    ['galaxy', 'star'],
-                'survey_depth':        ['Z<21.1'],
-                'ghostmask_selection': 'no ghostmask',
-            }
         """
         if panel_index not in self.selections_per_panel:
             raise ValueError(
@@ -1291,36 +1329,38 @@ class AngularClusteringPlots:
         ]
         self.selections_per_panel[panel_index].extend(matched)
 
-    # ---------------------------------------------------------------------- #
-
     def plot_correlation_figure(self, ncols=None, figsize=None):
         """
         Draw all panels in a single figure.
 
-        Parameters
-        ----------
-        ncols : int or None
-            Number of columns in the subplot grid. Defaults to num_panels
-            (single row).
-        figsize : tuple or None
-            Passed to plt.subplots.
+        Returns
+        -------
+        fig, axes, fit_results
+            fit_results is the same dict as self.fit_results, provided here
+            for convenience: {panel_index: [ {selection, m, m_err, c, gamma}, ... ]}
         """
         ncols = ncols or self.num_panels
         nrows = int(np.ceil(self.num_panels / ncols))
         figsize = figsize or (5 * ncols, 4 * nrows)
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, sharex=True, sharey=True, constrained_layout=True)
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=figsize,
+            squeeze=False, sharex=True, sharey=True,
+            constrained_layout=True
+        )
         axes_flat = axes.flatten()
+
+        # reset fit results each time we (re)draw
+        self.fit_results = {panel: [] for panel in range(self.num_panels)}
 
         for panel_idx in range(self.num_panels):
             ax = axes_flat[panel_idx]
             results_for_panel = self.selections_per_panel[panel_idx]
             if results_for_panel:
-                self._plot_correlation_function_subplot(ax, results_for_panel)
+                self._plot_correlation_function_subplot(ax, results_for_panel, panel_idx)
             else:
                 ax.set_visible(False)
 
-        # Hide any unused axes beyond num_panels
         for ax in axes_flat[self.num_panels:]:
             ax.set_visible(False)
 
@@ -1329,14 +1369,10 @@ class AngularClusteringPlots:
                 continue
             row = i // ncols
             col = i % ncols
-
             if col == 0:
                 ax.set_ylabel(r'$w(\theta)$')
-
-            # Label x-axis if there's no visible panel directly below
             next_row_idx = i + ncols
-            bottom_edge = (next_row_idx >= self.num_panels)
-            if bottom_edge:
+            if next_row_idx >= self.num_panels:
                 ax.set_xlabel(r'$\theta$ [degrees]')
 
         if self.save_location:
@@ -1345,22 +1381,76 @@ class AngularClusteringPlots:
         else:
             plt.show()
 
-        return fig, axes
+        return fig, axes, self.fit_results
 
-    def _plot_correlation_function_subplot(self, ax, clustering_result_per_plot):
+    def _fit_power_law(self, meanlogr, xi_raw, varxi_raw):
+        """
+        Fit log(xi) = m * log(theta) + c, replicating the standalone fitting
+        script: restrict to theta < fit_max_theta, xi > 0, varxi > 0, and
+        propagate errors via Var[log(xi)] ~= Var[xi] / xi^2.
+
+        Returns None if there isn't enough data to fit, otherwise a dict with
+        m, m_err, c, gamma, and the (log_r, log_xi, sigma_logxi) arrays that
+        were actually used, so the fit line / points can be drawn.
+        """
+        meanlogr = np.asarray(meanlogr)
+        xi_raw = np.asarray(xi_raw)
+        varxi_raw = np.asarray(varxi_raw)
+
+        sel_on_r = (
+            (meanlogr < np.log(self.fit_max_theta))
+            & (xi_raw > 0)
+            & (varxi_raw > 0)
+        )
+
+        if np.count_nonzero(sel_on_r) < 2:
+            return None
+
+        r = meanlogr[sel_on_r]
+        xi_raw_sel = xi_raw[sel_on_r]
+        varxi_sel = varxi_raw[sel_on_r]
+
+        log_xi = np.log(xi_raw_sel)
+        var_logxi = varxi_sel / xi_raw_sel ** 2
+        sigma_logxi = np.sqrt(var_logxi)
+
+        try:
+            popt, pcov = curve_fit(
+                _line, r, log_xi,
+                sigma=sigma_logxi,
+                absolute_sigma=True,
+            )
+        except Exception as exc:
+            print(f"  Fit failed: {exc}")
+            return None
+
+        m, c = popt
+        m_err = np.sqrt(pcov[0, 0])
+        gamma = -(m - 1)
+
+        return {
+            'm': m,
+            'm_err': m_err,
+            'c': c,
+            'gamma': gamma,
+            'log_r': r,
+            'log_xi': log_xi,
+            'sigma_logxi': sigma_logxi,
+        }
+
+    def _plot_correlation_function_subplot(self, ax, clustering_result_per_plot, panel_idx=None):
         """
         Plot one or more w(theta) curves on a single Axes.
-
-        Parameters
-        ----------
-        ax : matplotlib.axes.Axes
-        clustering_result_per_plot : list of dict
-            Each dict has keys 'selection' and 'columns'
-            (with sub-keys 'xi', 'varxi', 'meanlogr').
         """
-        # Work out which values are shared across all results on this panel so
-        # they can be shown in the title rather than repeated in every label.
         panel_title, title_value_set = _build_panel_title(clustering_result_per_plot)
+
+        # Deterministic ordering: depends only on the selection contents, not
+        # on the order results were matched/appended in, so the same inputs
+        # always produce the same left-to-right / legend ordering.
+        clustering_result_per_plot = sorted(
+            clustering_result_per_plot,
+            key=_selection_sort_key,
+        )
 
         for result in clustering_result_per_plot:
             columns  = result['columns']
@@ -1371,38 +1461,72 @@ class AngularClusteringPlots:
             r   = np.exp(meanlogr)
             sel = result.get('selection', {})
 
-            colour    = _colour_for(sel)
             linestyle = _linestyle_for(sel)
             label     = _label_for(sel, title_value_set)
 
-            # Only plot positive xi values on a log-log scale
             if self.log_scale:
                 pos_mask = xi > 0
                 if not np.any(pos_mask):
                     print(f"  Warning: no positive xi values for selection {sel}. Skipping.")
                     continue
-            else:                
+            else:
                 pos_mask = np.ones_like(xi, dtype=bool)
 
-            ax.plot(
+            ra_strip = sel.get('ra_strip')
+
+            colour = _colour_for_strip(ra_strip) if ra_strip is not None else None
+
+            # Do the fit (if requested) before plotting so we can append the
+            # gamma value onto the legend label.
+            fit = None
+            if self.plot_fit:
+                fit = self._fit_power_law(meanlogr, xi, varxi)
+                if fit is not None:
+                    label = f"{label}, " r"$\gamma$" f" = {fit['gamma']:.3f}"
+                    if panel_idx is not None:
+                        self.fit_results[panel_idx].append({
+                            'selection': sel,
+                            'm': fit['m'],
+                            'm_err': fit['m_err'],
+                            'c': fit['c'],
+                            'gamma': fit['gamma'],
+                        })
+                        print(f"{sel}")
+                        print(f"  slope = {fit['m']} +- {fit['m_err']}")
+                        print(f"  gamma = {fit['gamma']}")
+
+            line, = ax.plot(
                 r[pos_mask], xi[pos_mask],
                 label=label,
-                color=colour,
                 linestyle=linestyle,
+                color=colour,   # None falls back to the matplotlib cycle
             )
+            colour = line.get_color()  # grab whatever colour the cycle assigned
             ax.errorbar(
                 r[pos_mask], xi[pos_mask],
                 yerr=np.sqrt(varxi[pos_mask]),
-                lw=1.5, alpha = 0.25, ls='', color=colour,
+                lw=1.5, alpha=0.25, ls='', color=colour,
             )
+
+            if fit is not None:
+                # Transform the log-log fit back into linear r / xi space so
+                # it overlays correctly on the (log-scaled) axes.
+                log_r_min = fit['log_r'].min()
+                log_r_max = fit['log_r'].max()
+                fit_r  = np.exp([log_r_min, log_r_max])
+                fit_xi = np.exp(_line(np.array([log_r_min, log_r_max]), fit['m'], fit['c']))
+                ax.plot(
+                    fit_r, fit_xi,
+                    linestyle='-', linewidth=1.2, color=colour,
+                )
+
         if self.log_scale:
             ax.set_xscale('log')
             ax.set_yscale('log')
             ax.set_xlim(0.01, 10)
         else:
             ax.set_xlim(0.1, 3)
-        #ax.set_xlabel(r'$\theta$ [degrees]')
-        #ax.set_ylabel(r'$w(\theta)$')
+
         ax.legend(fontsize=7)
         ax.grid()
 
