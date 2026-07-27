@@ -1158,12 +1158,15 @@ class WavesWideClustering:
 # --------------------------------------------------------------------------- #
 # Plotting
 # --------------------------------------------------------------------------- #
-
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+import scipy.integrate
+import scipy.special
 from scipy.optimize import curve_fit
+from astropy.cosmology import FlatLambdaCDM
 
 _COLOUR_BY_TARGET = {
     'star':               'red',
@@ -1181,6 +1184,77 @@ _DEFAULT_LINESTYLE = '-'
 
 _STRIP_CMAP = cm.rainbow  # or cm.hsv
 
+
+# ---------------------------------------------------------------------------
+# Limber scaling test config / machinery
+# ---------------------------------------------------------------------------
+
+# TODO: replace these with your actual BE (Baugh & Efstathiou 1993) fit
+# parameters per magnitude slice. Keys are (mlo, mhi) tuples; values are
+# (zc, alpha, beta, norm) as used by be_fit(). norm cancels out in the Limber
+# amplitude ratio, so it doesn't need to be an accurate absolute normalisation
+# -- but keep it nonzero and consistent if you're comparing anything else.
+# zc, alpha, beta, norm
+BE_PARAMS_BY_MAG_BIN = {
+    (16, 17): (0.1325, 1.3553, 2.2421, 1.0),
+    (17, 18): (0.1967, 1.3453, 2.3666, 1.0),
+    (18, 19): (0.2852, 1.3387, 2.4943, 1.0),
+    (19, 20): (0.4046,  1.3351, 2.6140, 1.0),
+    (20, 21): (0.5637, 1.3327, 2.7176, 1.0),
+    (21, 22): (0.7762,  1.3294,  2.8088, 1.0)
+}
+
+
+def be_fit(z, zc, alpha, beta, norm):
+    """Generalised Baugh & Efstathiou (1993, eqn 7) model for N(z)."""
+    return norm * z ** alpha * np.exp(-(z / zc) ** beta)
+
+
+def predict_limber_amplitude(cosmo, be_pars, gamma, eps=0.0,
+                              zmin=1e-3, zmax=2.0):
+    """Limber-predicted amplitude A for w(theta) = A * theta^(1-gamma)
+    [theta in RADIANS], at r0 = 1, for a BE(z) redshift distribution.
+
+    r0 always enters as r0**gamma, so this is 'per unit r0^gamma'; use
+    r0_from_fit() to solve for the real r0 given an observed amplitude.
+    """
+    def Nz(z):
+        return be_fit(z, *be_pars)
+
+    def denfun(z):
+        return Nz(z)
+
+    def xifun(z):
+        x = cosmo.dc(z)
+        return (x ** (1 - gamma) * Nz(z) ** 2 *
+                (1 + z) ** (gamma - 3 - eps) / cosmo.dxdz(z))
+
+    gfac = (math.pi ** 0.5 * scipy.special.gamma((gamma - 1) / 2) /
+            scipy.special.gamma(gamma / 2))
+
+    num = scipy.integrate.quad(xifun, zmin, zmax, epsabs=1e3, epsrel=1e-3)[0]
+    den = scipy.integrate.quad(denfun, zmin, zmax, epsabs=1e3, epsrel=1e-3)[0] ** 2
+    return gfac * num / den
+
+
+def r0_from_fit(cosmo, be_pars, gamma, A_obs_rad, eps=0.0,
+                 zmin=1e-3, zmax=2.0):
+    """Infer r0 from a measured w(theta) = A_obs_rad * theta^(1-gamma)
+    [theta in RADIANS] and a BE(z) fit."""
+    A_unit = predict_limber_amplitude(cosmo, be_pars, gamma, eps=eps,
+                                       zmin=zmin, zmax=zmax)
+    if A_unit <= 0 or A_obs_rad <= 0:
+        return np.nan
+    return (A_obs_rad / A_unit) ** (1.0 / gamma)
+
+
+def _amplitude_deg_to_rad(A_deg, gamma):
+    """Convert amplitude A in w(theta)=A*theta^(1-gamma) from theta-in-degrees
+    to theta-in-radians convention."""
+    return A_deg * (180.0 / math.pi) ** (1 - gamma)
+
+
+# ---------------------------------------------------------------------------
 
 def _colour_for_strip(ra_strip) -> str:
     """Map strip 0-9 to a rainbow colour."""
@@ -1252,7 +1326,9 @@ def _line(x, m, c):
 
 class AngularClusteringPlots:
     def __init__(self, clustering_results, num_panels, save_location=None,
-                 log_scale=True, plot_fit=False, fit_max_theta=0.9):
+                 log_scale=True, plot_fit=False, fit_max_theta=0.9,
+                 limber_test=False, cosmo='default', limber_eps=0.0,
+                 mag_bin_key='maglim', limber_zmin=1e-3, limber_zmax=2.0):
         """
         Parameters
         ----------
@@ -1276,6 +1352,23 @@ class AngularClusteringPlots:
             Only points with theta < fit_max_theta [degrees] are used in the
             fit (mirrors the r < np.log(0.9) cut in the original fitting
             script).
+        limber_test : bool
+            If True (and plot_fit is True), each fitted slice is compared
+            against its Limber-predicted amplitude (using the BE(z) fit for
+            that slice from BE_PARAMS_BY_MAG_BIN) and an inferred r0 is
+            recorded per slice. Requires `cosmo` to be supplied.
+        cosmo : object or None
+            Cosmology lookup providing .dc(z) [comoving distance] and
+            .dxdz(z) [Jacobian dx/dz]. Required if limber_test=True.
+        limber_eps : float
+            Clustering evolution parameter eps used in the Limber integral
+            (0 = stable clustering in comoving coordinates).
+        mag_bin_key : str
+            Key in each result's `selection` dict used to look up the
+            magnitude slice (and hence BE params). See _get_mag_bin() for
+            accepted formats.
+        limber_zmin, limber_zmax : float
+            Integration limits in redshift for the Limber integral.
         """
         self.clustering_results = clustering_results
         self.save_location = save_location
@@ -1284,10 +1377,25 @@ class AngularClusteringPlots:
         self.plot_fit = plot_fit
         self.fit_max_theta = fit_max_theta
 
+        self.limber_test = limber_test
+        self.cosmo = cosmo
+        self.limber_eps = limber_eps
+        self.mag_bin_key = mag_bin_key
+        self.limber_zmin = limber_zmin
+        self.limber_zmax = limber_zmax
+        if self.limber_test and self.cosmo is None:
+            raise ValueError(
+                "limber_test=True requires a `cosmo` object with .dc(z) "
+                "and .dxdz(z) methods."
+            )
+        if self.comso == 'default':
+            self.cosmo = FlatLambdaCDM(H0=100, Om0=0.3)
+
         self.selections_per_panel = {panel: [] for panel in range(num_panels)}
 
         # Populated by plot_correlation_figure / _plot_correlation_function_subplot.
-        # Structure: {panel_index: [ {selection, m, m_err, c, gamma} , ... ] }
+        # Structure: {panel_index: [ {selection, m, m_err, c, gamma,
+        #                              [r0, A_obs_rad, be_pars]} , ... ] }
         self.fit_results = {panel: [] for panel in range(num_panels)}
 
     def assign_results_to_panel(self, panel_index, selection_filters):
@@ -1329,6 +1437,111 @@ class AngularClusteringPlots:
         ]
         self.selections_per_panel[panel_index].extend(matched)
 
+    # -----------------------------------------------------------------
+    # Limber scaling helpers
+    # -----------------------------------------------------------------
+
+    def _get_mag_bin(self, selection: dict):
+        """
+        Extract a (mlo, mhi) magnitude-bin tuple from a selection dict, to
+        key into BE_PARAMS_BY_MAG_BIN.
+
+        Adapt this to however your selection dict actually encodes the
+        magnitude slice. Currently accepts, under self.mag_bin_key:
+          - a (mlo, mhi) tuple/list
+          - a string like '16-17', '16_17', '16 to 17'
+        """
+        raw = selection.get(self.mag_bin_key)
+        if raw is None:
+            raise KeyError(
+                f"selection has no '{self.mag_bin_key}' entry needed to "
+                f"look up BE params for the Limber test. Available keys: "
+                f"{list(selection.keys())}"
+            )
+        if isinstance(raw, (tuple, list)) and len(raw) == 2:
+            return (float(raw[0]), float(raw[1]))
+        if isinstance(raw, str):
+            s = raw.replace('to', '-').replace('_', '-')
+            parts = [p for p in s.split('-') if p.strip() != '']
+            if len(parts) == 2:
+                return (float(parts[0]), float(parts[1]))
+        raise ValueError(f"Could not parse magnitude bin from {raw!r}")
+
+    def _run_limber_test(self, sel, gamma, c):
+        """Compute Limber-predicted r0 for one fitted slice. Returns dict
+        with r0, A_obs_rad, be_pars, or None if params/cosmo unavailable."""
+        try:
+            mag_bin = self._get_mag_bin(sel)
+        except (KeyError, ValueError) as exc:
+            print(f"  Limber test skipped for {sel}: {exc}")
+            return None
+
+        be_pars = BE_PARAMS_BY_MAG_BIN.get(mag_bin)
+        if be_pars is None:
+            print(f"  Limber test skipped: no BE params for mag bin {mag_bin}")
+            return None
+
+        A_obs_deg = math.exp(c)          # amplitude with theta in degrees
+        A_obs_rad = _amplitude_deg_to_rad(A_obs_deg, gamma)
+
+        r0 = r0_from_fit(
+            self.cosmo, be_pars, gamma, A_obs_rad, eps=self.limber_eps,
+            zmin=self.limber_zmin, zmax=self.limber_zmax,
+        )
+        return {'r0': r0, 'A_obs_rad': A_obs_rad, 'be_pars': be_pars,
+                'mag_bin': mag_bin}
+
+    def plot_limber_scaling(self, save_location=None, figsize=(6, 4)):
+        """
+        Plot inferred r0 vs. magnitude-bin midpoint for every slice that had
+        a successful Limber test, across all panels. Flat r0 => amplitude
+        differences between slices are explained by N(z) dilution alone;
+        a trend => real clustering evolution (or eps is mis-set).
+        """
+        if not self.limber_test:
+            raise RuntimeError(
+                "plot_limber_scaling() requires limber_test=True and a "
+                "prior call to plot_correlation_figure()."
+            )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        any_points = False
+        for panel_idx, entries in self.fit_results.items():
+            mids, r0s = [], []
+            for e in entries:
+                if e.get('r0') is None or not np.isfinite(e.get('r0', np.nan)):
+                    continue
+                mlo, mhi = e['mag_bin']
+                mids.append(0.5 * (mlo + mhi))
+                r0s.append(e['r0'])
+            if mids:
+                any_points = True
+                order = np.argsort(mids)
+                mids_arr = np.array(mids)[order]
+                r0_arr = np.array(r0s)[order]
+                ax.plot(mids_arr, r0_arr, 'o-', label=f'panel {panel_idx}')
+
+        if not any_points:
+            print("No Limber results available to plot "
+                  "(check mag_bin_key / BE_PARAMS_BY_MAG_BIN / cosmo).")
+            plt.close(fig)
+            return None
+
+        ax.set_xlabel('magnitude')
+        ax.set_ylabel(r'inferred $r_0$ [Mpc]')
+        ax.legend(fontsize=7)
+        ax.grid()
+
+        save_location = save_location or self.save_location
+        if save_location:
+            fig.savefig(save_location, dpi=150, bbox_inches='tight')
+            print(f"Limber scaling figure saved to {save_location}")
+        else:
+            plt.show()
+        return fig, ax
+
+    # -----------------------------------------------------------------
+
     def plot_correlation_figure(self, ncols=None, figsize=None):
         """
         Draw all panels in a single figure.
@@ -1337,7 +1550,8 @@ class AngularClusteringPlots:
         -------
         fig, axes, fit_results
             fit_results is the same dict as self.fit_results, provided here
-            for convenience: {panel_index: [ {selection, m, m_err, c, gamma}, ... ]}
+            for convenience: {panel_index: [ {selection, m, m_err, c, gamma,
+            [r0, A_obs_rad, be_pars, mag_bin]}, ... ]}
         """
         ncols = ncols or self.num_panels
         nrows = int(np.ceil(self.num_panels / ncols))
@@ -1483,17 +1697,30 @@ class AngularClusteringPlots:
                 fit = self._fit_power_law(meanlogr, xi, varxi)
                 if fit is not None:
                     label = f"{label}, " r"$\gamma$" f" = {fit['gamma']:.3f}"
+
+                    limber_info = None
+                    if self.limber_test:
+                        limber_info = self._run_limber_test(sel, fit['gamma'], fit['c'])
+                        if limber_info is not None and np.isfinite(limber_info['r0']):
+                            label = f"{label}, " r"$r_0$" f" = {limber_info['r0']:.2f}"
+
                     if panel_idx is not None:
-                        self.fit_results[panel_idx].append({
+                        entry = {
                             'selection': sel,
                             'm': fit['m'],
                             'm_err': fit['m_err'],
                             'c': fit['c'],
                             'gamma': fit['gamma'],
-                        })
+                        }
+                        if limber_info is not None:
+                            entry.update(limber_info)
+                        self.fit_results[panel_idx].append(entry)
+
                         print(f"{sel}")
                         print(f"  slope = {fit['m']} +- {fit['m_err']}")
                         print(f"  gamma = {fit['gamma']}")
+                        if limber_info is not None:
+                            print(f"  Limber r0 = {limber_info['r0']}")
 
             line, = ax.plot(
                 r[pos_mask], xi[pos_mask],
