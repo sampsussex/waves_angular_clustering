@@ -152,7 +152,7 @@ def generate_randoms(data_df, region, factor=20, seed=None):
 def get_cosmology():
     # H0=100 -> comoving_distance() returns Mpc/h directly.
     # CHECK Om0 matches your mock's fiducial cosmology.
-    return FlatLambdaCDM(H0=100.0, Om0=0.3121)
+    return FlatLambdaCDM(H0=100.0, Om0=0.3)
 
 
 def to_cartesian(ra_deg, dec_deg, z, cosmo):
