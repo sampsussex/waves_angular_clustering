@@ -1388,7 +1388,7 @@ class AngularClusteringPlots:
                 "limber_test=True requires a `cosmo` object with .dc(z) "
                 "and .dxdz(z) methods."
             )
-        if self.comso == 'default':
+        if self.cosmo == 'default':
             self.cosmo = FlatLambdaCDM(H0=100, Om0=0.3)
 
         self.selections_per_panel = {panel: [] for panel in range(num_panels)}
