@@ -1567,7 +1567,8 @@ class AngularClusteringPlots:
         return fig, ax
 
     def plot_limber_shift_test(self, reference_bin='19<Z<20', eps=None,
-                                    ncols=None, figsize=None, save_location=None):
+                                    ncols=None, figsize=None, save_location=None,
+                                    residual_ylim=None):
             """
             For each panel, shift every survey_depth slice's w(theta) vertically
             (log10 w only) onto the reference_bin slice, using each slice's own
@@ -1582,6 +1583,10 @@ class AngularClusteringPlots:
                 (e.g. '19<Z<20').
             eps : float or None
                 Clustering evolution parameter; defaults to self.limber_eps.
+            residual_ylim : tuple(float, float) or None
+                If given, sets the y-axis (delta log10 w) limits on every
+                residual subplot to this (ymin, ymax). If None, matplotlib's
+                default autoscaling is used.
             """
             if not self.limber_test:
                 raise RuntimeError("plot_limber_shift_test() requires limber_test=True.")
@@ -1717,6 +1722,8 @@ class AngularClusteringPlots:
                 ax_main.set_xscale('log')
                 ax_main.set_yscale('log')
                 ax_res.set_xscale('log')
+                if residual_ylim is not None:
+                    ax_res.set_ylim(*residual_ylim)
                 ax_main.set_ylabel(r'$w(\theta)$ (shifted)')
                 ax_res.set_ylabel(r'$\Delta\log_{10}w$')
                 ax_res.set_xlabel(r'$\theta$ [degrees]')
