@@ -152,7 +152,7 @@ def generate_randoms(data_df, region, factor=20, seed=None):
 def get_cosmology():
     # H0=100 -> comoving_distance() returns Mpc/h directly.
     # CHECK Om0 matches your mock's fiducial cosmology.
-    return FlatLambdaCDM(H0=100.0, Om0=0.3)
+    return FlatLambdaCDM(H0=100.0, Om0=0.3121)
 
 
 def to_cartesian(ra_deg, dec_deg, z, cosmo):
@@ -170,8 +170,14 @@ def to_cartesian(ra_deg, dec_deg, z, cosmo):
 # --------------------------------------------------------------------------
 
 def _unit_vec(ra, dec):
-    ra_r = np.radians(ra)
-    dec_r = np.radians(dec)
+    # Force float64 regardless of input dtype. Parquet columns are often
+    # float32, while the randoms (built with np.random / np.degrees /
+    # np.arcsin) come out float64 -- feeding KMeans.fit() float32 data and
+    # then .predict() float64 data (or vice versa) raises a Cython buffer
+    # dtype mismatch, since sklearn's KMeans keeps cluster_centers_ in
+    # whatever dtype it was fit on.
+    ra_r = np.radians(np.asarray(ra, dtype=np.float64))
+    dec_r = np.radians(np.asarray(dec, dtype=np.float64))
     return np.column_stack([
         np.cos(dec_r) * np.cos(ra_r),
         np.cos(dec_r) * np.sin(ra_r),
