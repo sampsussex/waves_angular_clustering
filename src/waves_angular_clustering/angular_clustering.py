@@ -1566,159 +1566,172 @@ class AngularClusteringPlots:
             plt.show()
         return fig, ax
 
-    # -----------------------------------------------------------------
     def plot_limber_shift_test(self, reference_bin='19<Z<20', eps=None,
-                                ncols=None, figsize=None, save_location=None):
-        """
-        For each panel, shift every survey_depth slice's w(theta) vertically
-        (log10 w only) onto the reference_bin slice, using each slice's own
-        fitted power-law slope gamma (from _fit_power_law) and the single
-        power-law Limber amplitude ratio. Plots the aligned curves with a
-        residual panel underneath.
+                                    ncols=None, figsize=None, save_location=None):
+            """
+            For each panel, shift every survey_depth slice's w(theta) vertically
+            (log10 w only) onto the reference_bin slice, using each slice's own
+            fitted power-law slope gamma (from _fit_power_law) and the single
+            power-law Limber amplitude ratio. Plots the aligned curves with a
+            residual panel (with error bars) underneath.
 
-        Parameters
-        ----------
-        reference_bin : str
-            Key into BE_PARAMS_BY_MAG_BIN / survey_depth to use as reference
-            (e.g. '19<Z<20').
-        eps : float or None
-            Clustering evolution parameter; defaults to self.limber_eps.
-        """
-        if not self.limber_test:
-            raise RuntimeError("plot_limber_shift_test() requires limber_test=True.")
+            Parameters
+            ----------
+            reference_bin : str
+                Key into BE_PARAMS_BY_MAG_BIN / survey_depth to use as reference
+                (e.g. '19<Z<20').
+            eps : float or None
+                Clustering evolution parameter; defaults to self.limber_eps.
+            """
+            if not self.limber_test:
+                raise RuntimeError("plot_limber_shift_test() requires limber_test=True.")
 
-        eps = self.limber_eps if eps is None else eps
-        be_pars_ref = BE_PARAMS_BY_MAG_BIN.get(reference_bin)
-        if be_pars_ref is None:
-            raise ValueError(f"No BE params for reference_bin '{reference_bin}' "
-                              f"in BE_PARAMS_BY_MAG_BIN.")
+            eps = self.limber_eps if eps is None else eps
+            be_pars_ref = BE_PARAMS_BY_MAG_BIN.get(reference_bin)
+            if be_pars_ref is None:
+                raise ValueError(f"No BE params for reference_bin '{reference_bin}' "
+                                f"in BE_PARAMS_BY_MAG_BIN.")
 
-        panels_with_data = [p for p, res in self.selections_per_panel.items() if res]
-        if not panels_with_data:
-            print("No panel data to plot (call assign_results_to_panel first).")
-            return None
+            panels_with_data = [p for p, res in self.selections_per_panel.items() if res]
+            if not panels_with_data:
+                print("No panel data to plot (call assign_results_to_panel first).")
+                return None
 
-        ncols = ncols or len(panels_with_data)
-        nrows_pairs = int(np.ceil(len(panels_with_data) / ncols))
-        figsize = figsize or (5 * ncols, 4 * 2 * nrows_pairs)
+            ncols = ncols or len(panels_with_data)
+            nrows_pairs = int(np.ceil(len(panels_with_data) / ncols))
+            figsize = figsize or (5 * ncols, 4 * 2 * nrows_pairs)
 
-        fig, axes = plt.subplots(
-            nrows_pairs * 2, ncols, figsize=figsize, squeeze=False,
-            sharex='col', constrained_layout=True,
-            gridspec_kw={'height_ratios': [3, 1] * nrows_pairs},
-        )
+            fig, axes = plt.subplots(
+                nrows_pairs * 2, ncols, figsize=figsize, squeeze=False,
+                sharex='col', constrained_layout=True,
+                gridspec_kw={'height_ratios': [3, 1] * nrows_pairs},
+            )
 
-        self.limber_shift_results = {p: [] for p in panels_with_data}
+            self.limber_shift_results = {p: [] for p in panels_with_data}
 
-        for idx, panel_idx in enumerate(panels_with_data):
-            row_pair = idx // ncols
-            col = idx % ncols
-            ax_main = axes[row_pair * 2, col]
-            ax_res  = axes[row_pair * 2 + 1, col]
+            for idx, panel_idx in enumerate(panels_with_data):
+                row_pair = idx // ncols
+                col = idx % ncols
+                ax_main = axes[row_pair * 2, col]
+                ax_res  = axes[row_pair * 2 + 1, col]
 
-            results = self.selections_per_panel[panel_idx]
+                results = self.selections_per_panel[panel_idx]
 
-            ref_results = [r for r in results
-                           if r.get('selection', {}).get(self.mag_bin_key) == reference_bin]
-            if not ref_results:
-                print(f"Panel {panel_idx}: no result matching reference_bin "
-                      f"'{reference_bin}', skipping.")
-                ax_main.set_visible(False)
-                ax_res.set_visible(False)
-                continue
-            ref_result = ref_results[0]
-
-            ref_meanlogr = np.array(ref_result['columns']['meanlogr'])
-            ref_xi       = np.array(ref_result['columns']['xi'])
-            ref_pos      = ref_xi > 0
-            ref_theta = np.exp(ref_meanlogr[ref_pos])
-            ref_log_theta = np.log10(ref_theta)
-            ref_log_xi = np.log10(ref_xi[ref_pos])
-            order = np.argsort(ref_log_theta)
-            ref_log_theta = ref_log_theta[order]
-            ref_log_xi = ref_log_xi[order]
-
-            ax_main.plot(10**ref_log_theta, 10**ref_log_xi, 'k-',
-                         lw=2, label=f'{reference_bin} (ref)', zorder=5)
-
-            for result in sorted(results, key=_selection_sort_key):
-                sel = result.get('selection', {})
-                mag_bin = sel.get(self.mag_bin_key)
-                if mag_bin is None:
+                ref_results = [r for r in results
+                            if r.get('selection', {}).get(self.mag_bin_key) == reference_bin]
+                if not ref_results:
+                    print(f"Panel {panel_idx}: no result matching reference_bin "
+                        f"'{reference_bin}', skipping.")
+                    ax_main.set_visible(False)
+                    ax_res.set_visible(False)
                     continue
-                be_pars_i = BE_PARAMS_BY_MAG_BIN.get(mag_bin)
-                if be_pars_i is None:
-                    print(f"  Shift test skipped for '{mag_bin}': no BE params.")
-                    continue
+                ref_result = ref_results[0]
 
-                meanlogr = np.array(result['columns']['meanlogr'])
-                xi       = np.array(result['columns']['xi'])
-                varxi    = np.array(result['columns']['varxi'])
+                ref_meanlogr = np.array(ref_result['columns']['meanlogr'])
+                ref_xi       = np.array(ref_result['columns']['xi'])
+                ref_varxi    = np.array(ref_result['columns']['varxi'])
+                ref_pos      = ref_xi > 0
 
-                fit = self._fit_power_law(meanlogr, xi, varxi)
-                if fit is None:
-                    print(f"  Shift test skipped for '{mag_bin}': power-law fit failed.")
-                    continue
-                gamma_i = fit['gamma']
+                ref_theta = np.exp(ref_meanlogr[ref_pos])
+                ref_log_theta = np.log10(ref_theta)
+                ref_log_xi = np.log10(ref_xi[ref_pos])
+                # Var[log10(xi)] ~= Var[xi] / (xi * ln10)^2
+                ref_sigma_logxi = np.sqrt(ref_varxi[ref_pos]) / (ref_xi[ref_pos] * math.log(10))
 
-                dlgw = compute_limber_shift_single_powerlaw(
-                    self.cosmo, be_pars_i, be_pars_ref, gamma_i,
-                    eps=eps, zmin=self.limber_zmin, zmax=self.limber_zmax,
-                )
-                self.limber_shift_results[panel_idx].append({
-                    'selection': sel, 'mag_bin': mag_bin,
-                    'gamma': gamma_i, 'dlog10_w': dlgw,
-                })
+                order = np.argsort(ref_log_theta)
+                ref_log_theta = ref_log_theta[order]
+                ref_log_xi = ref_log_xi[order]
+                ref_sigma_logxi = ref_sigma_logxi[order]
 
-                pos = xi > 0
-                if not np.any(pos):
-                    continue
+                ax_main.plot(10**ref_log_theta, 10**ref_log_xi, 'k-',
+                            lw=2, label=f'{reference_bin} (ref)', zorder=5)
 
-                theta = np.exp(meanlogr[pos])
-                log_xi = np.log10(xi[pos])
+                for result in sorted(results, key=_selection_sort_key):
+                    sel = result.get('selection', {})
+                    mag_bin = sel.get(self.mag_bin_key)
+                    if mag_bin is None:
+                        continue
+                    be_pars_i = BE_PARAMS_BY_MAG_BIN.get(mag_bin)
+                    if be_pars_i is None:
+                        print(f"  Shift test skipped for '{mag_bin}': no BE params.")
+                        continue
 
-                shifted_log_xi = log_xi + dlgw
-                shifted_xi = 10**shifted_log_xi
-                shifted_err = shifted_xi * (np.sqrt(varxi[pos]) / xi[pos])  # propagate in log
+                    meanlogr = np.array(result['columns']['meanlogr'])
+                    xi       = np.array(result['columns']['xi'])
+                    varxi    = np.array(result['columns']['varxi'])
 
-                label = f"{mag_bin}" + ('' if mag_bin == reference_bin
-                                         else f", $\\gamma$={gamma_i:.2f}, $\\Delta\\log w$={dlgw:.2f}")
-                line, = ax_main.plot(theta, shifted_xi, 'o-', ms=3, label=label)
-                colour = line.get_color()
-                ax_main.errorbar(theta, shifted_xi, yerr=shifted_err,
-                                 lw=1, alpha=0.3, ls='', color=colour)
+                    fit = self._fit_power_law(meanlogr, xi, varxi)
+                    if fit is None:
+                        print(f"  Shift test skipped for '{mag_bin}': power-law fit failed.")
+                        continue
+                    gamma_i = fit['gamma']
 
-                if mag_bin == reference_bin:
-                    continue
+                    dlgw = compute_limber_shift_single_powerlaw(
+                        self.cosmo, be_pars_i, be_pars_ref, gamma_i,
+                        eps=eps, zmin=self.limber_zmin, zmax=self.limber_zmax,
+                    )
+                    self.limber_shift_results[panel_idx].append({
+                        'selection': sel, 'mag_bin': mag_bin,
+                        'gamma': gamma_i, 'dlog10_w': dlgw,
+                    })
 
-                log_theta = np.log10(theta)
-                in_range = ((log_theta >= ref_log_theta.min()) &
-                            (log_theta <= ref_log_theta.max()))
-                if not np.any(in_range):
-                    continue
-                ref_interp = np.interp(log_theta[in_range], ref_log_theta, ref_log_xi)
-                residual = shifted_log_xi[in_range] - ref_interp
-                ax_res.plot(theta[in_range], residual, 'o', ms=3, color=colour)
+                    pos = xi > 0
+                    if not np.any(pos):
+                        continue
 
-            ax_res.axhline(0, color='k', lw=1, ls='--')
-            ax_main.set_xscale('log')
-            ax_main.set_yscale('log')
-            ax_res.set_xscale('log')
-            ax_main.set_ylabel(r'$w(\theta)$ (shifted)')
-            ax_res.set_ylabel(r'$\Delta\log_{10}w$')
-            ax_res.set_xlabel(r'$\theta$ [degrees]')
-            ax_main.legend(fontsize=6)
-            ax_main.grid()
-            ax_res.grid()
+                    theta = np.exp(meanlogr[pos])
+                    log_xi = np.log10(xi[pos])
+                    # Var[log10(xi)] ~= Var[xi] / (xi * ln10)^2
+                    sigma_logxi_i = np.sqrt(varxi[pos]) / (xi[pos] * math.log(10))
 
-        save_location = save_location or self.save_location
-        if save_location:
-            fig.savefig(save_location, dpi=150, bbox_inches='tight')
-            print(f"Limber shift-test figure saved to {save_location}")
-        else:
-            plt.show()
+                    shifted_log_xi = log_xi + dlgw
+                    shifted_xi = 10**shifted_log_xi
+                    shifted_err = shifted_xi * math.log(10) * sigma_logxi_i  # linear-space error
 
-        return fig, axes, self.limber_shift_results
+                    label = f"{mag_bin}" + ('' if mag_bin == reference_bin
+                                            else f", $\\gamma$={gamma_i:.2f}, $\\Delta\\log w$={dlgw:.2f}")
+                    line, = ax_main.plot(theta, shifted_xi, 'o-', ms=3, label=label)
+                    colour = line.get_color()
+                    ax_main.errorbar(theta, shifted_xi, yerr=shifted_err,
+                                    lw=1, alpha=0.3, ls='', color=colour)
+
+                    if mag_bin == reference_bin:
+                        continue
+
+                    log_theta = np.log10(theta)
+                    in_range = ((log_theta >= ref_log_theta.min()) &
+                                (log_theta <= ref_log_theta.max()))
+                    if not np.any(in_range):
+                        continue
+
+                    ref_interp = np.interp(log_theta[in_range], ref_log_theta, ref_log_xi)
+                    ref_sigma_interp = np.interp(log_theta[in_range], ref_log_theta, ref_sigma_logxi)
+
+                    residual = shifted_log_xi[in_range] - ref_interp
+                    residual_err = np.sqrt(sigma_logxi_i[in_range]**2 + ref_sigma_interp**2)
+
+                    ax_res.errorbar(theta[in_range], residual, yerr=residual_err,
+                                    fmt='o', ms=3, color=colour, alpha=0.7, capsize=2)
+
+                ax_res.axhline(0, color='k', lw=1, ls='--')
+                ax_main.set_xscale('log')
+                ax_main.set_yscale('log')
+                ax_res.set_xscale('log')
+                ax_main.set_ylabel(r'$w(\theta)$ (shifted)')
+                ax_res.set_ylabel(r'$\Delta\log_{10}w$')
+                ax_res.set_xlabel(r'$\theta$ [degrees]')
+                ax_main.legend(fontsize=6)
+                ax_main.grid()
+                ax_res.grid()
+
+            save_location = save_location or self.save_location
+            if save_location:
+                fig.savefig(save_location, dpi=150, bbox_inches='tight')
+                print(f"Limber shift-test figure saved to {save_location}")
+            else:
+                plt.show()
+
+            return fig, axes, self.limber_shift_results
 
     def plot_correlation_figure(self, ncols=None, figsize=None):
         """
