@@ -1154,10 +1154,7 @@ class WavesWideClustering:
         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved DD/DR/RR diagnostic plot to {plot_path}")
-
-# --------------------------------------------------------------------------- #
-# Plotting
-# --------------------------------------------------------------------------- #
+import re
 import math
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1166,7 +1163,6 @@ import matplotlib.colors as mcolors
 import scipy.integrate
 import scipy.special
 from scipy.optimize import curve_fit
-from astropy.cosmology import FlatLambdaCDM
 
 _COLOUR_BY_TARGET = {
     'star':               'red',
@@ -1189,12 +1185,10 @@ _STRIP_CMAP = cm.rainbow  # or cm.hsv
 # Limber scaling test config / machinery
 # ---------------------------------------------------------------------------
 
-# TODO: replace these with your actual BE (Baugh & Efstathiou 1993) fit
-# parameters per magnitude slice. Keys are (mlo, mhi) tuples; values are
-# (zc, alpha, beta, norm) as used by be_fit(). norm cancels out in the Limber
-# amplitude ratio, so it doesn't need to be an accurate absolute normalisation
-# -- but keep it nonzero and consistent if you're comparing anything else.
-# zc, alpha, beta, norm
+# TODO: replace with your actual BE (Baugh & Efstathiou 1993) N(z) fit
+# parameters per survey_depth slice: (zc, alpha, beta, norm).
+# `norm` cancels in the Limber amplitude ratio, so it need not be an accurate
+# absolute normalisation -- keep it nonzero.
 BE_PARAMS_BY_MAG_BIN = {
     (16, 17): (0.1325, 1.3553, 2.2421, 1.0),
     (17, 18): (0.1967, 1.3453, 2.3666, 1.0),
@@ -1204,20 +1198,47 @@ BE_PARAMS_BY_MAG_BIN = {
     (21, 22): (0.7762,  1.3294,  2.8088, 1.0)
 }
 
+_BIN_EDGE_RE = re.compile(r'([\d.]+)\s*<\s*Z\s*<\s*([\d.]+)', re.IGNORECASE)
+
+
+def _parse_bin_edges(bin_str):
+    """'16<Z<17' -> (16.0, 17.0). Returns None if it doesn't match."""
+    m = _BIN_EDGE_RE.search(str(bin_str))
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
+
 
 def be_fit(z, zc, alpha, beta, norm):
     """Generalised Baugh & Efstathiou (1993, eqn 7) model for N(z)."""
     return norm * z ** alpha * np.exp(-(z / zc) ** beta)
 
 
+class _DefaultFlatLCDM:
+    """Minimal cosmology wrapper providing dc(z) and dxdz(z), used as the
+    fallback when no `cosmo` object is supplied to AngularClusteringPlots.
+    Requires astropy. Swap in your own object (with the same two methods)
+    for anything more specific to your analysis."""
+
+    def __init__(self, H0=100.0, Om0=0.3):
+        from astropy.cosmology import FlatLambdaCDM
+        import astropy.units as u
+        self._u = u
+        self._cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+        self._c_km_s = 299792.458
+
+    def dc(self, z):
+        return self._cosmo.comoving_distance(z).to(self._u.Mpc).value
+
+    def dxdz(self, z):
+        Hz = self._cosmo.H(z).to(self._u.km / self._u.s / self._u.Mpc).value
+        return self._c_km_s / Hz
+
+
 def predict_limber_amplitude(cosmo, be_pars, gamma, eps=0.0,
                               zmin=1e-3, zmax=2.0):
     """Limber-predicted amplitude A for w(theta) = A * theta^(1-gamma)
-    [theta in RADIANS], at r0 = 1, for a BE(z) redshift distribution.
-
-    r0 always enters as r0**gamma, so this is 'per unit r0^gamma'; use
-    r0_from_fit() to solve for the real r0 given an observed amplitude.
-    """
+    [theta in RADIANS], at r0 = 1, for a BE(z) redshift distribution."""
     def Nz(z):
         return be_fit(z, *be_pars)
 
@@ -1327,8 +1348,8 @@ def _line(x, m, c):
 class AngularClusteringPlots:
     def __init__(self, clustering_results, num_panels, save_location=None,
                  log_scale=True, plot_fit=False, fit_max_theta=0.9,
-                 limber_test=False, cosmo='default', limber_eps=0.0,
-                 mag_bin_key='maglim', limber_zmin=1e-3, limber_zmax=2.0):
+                 limber_test=False, cosmo=None, limber_eps=0.0,
+                 mag_bin_key='survey_depth', limber_zmin=1e-3, limber_zmax=2.0):
         """
         Parameters
         ----------
@@ -1344,29 +1365,27 @@ class AngularClusteringPlots:
         plot_fit : bool
             If True, fit a straight line (power law) to log(xi) vs log(theta)
             for each curve, overplot the fit, and record the fitted slope /
-            gamma. Fitting is done in log-log space (matching the underlying
-            data storage), and the resulting fit line is transformed back
-            into linear r/xi space so it can be drawn on the existing axes
-            (which are log-scaled, so it still looks like a straight line).
+            gamma.
         fit_max_theta : float
             Only points with theta < fit_max_theta [degrees] are used in the
-            fit (mirrors the r < np.log(0.9) cut in the original fitting
-            script).
+            fit.
         limber_test : bool
             If True (and plot_fit is True), each fitted slice is compared
             against its Limber-predicted amplitude (using the BE(z) fit for
-            that slice from BE_PARAMS_BY_MAG_BIN) and an inferred r0 is
-            recorded per slice. Requires `cosmo` to be supplied.
+            that slice from BE_PARAMS_BY_MAG_BIN, keyed on the
+            `mag_bin_key` selection value e.g. '16<Z<17') and an inferred r0
+            is recorded per slice.
         cosmo : object or None
-            Cosmology lookup providing .dc(z) [comoving distance] and
-            .dxdz(z) [Jacobian dx/dz]. Required if limber_test=True.
+            Cosmology providing .dc(z) [comoving distance, Mpc] and
+            .dxdz(z) [dx/dz, Mpc]. If None and limber_test=True, a default
+            flat LCDM (H0=70, Om0=0.3, via astropy) is constructed
+            automatically.
         limber_eps : float
-            Clustering evolution parameter eps used in the Limber integral
-            (0 = stable clustering in comoving coordinates).
+            Clustering evolution parameter eps (0 = stable clustering in
+            comoving coordinates).
         mag_bin_key : str
             Key in each result's `selection` dict used to look up the
-            magnitude slice (and hence BE params). See _get_mag_bin() for
-            accepted formats.
+            BE(z) params, e.g. selection['survey_depth'] == '16<Z<17'.
         limber_zmin, limber_zmax : float
             Integration limits in redshift for the Limber integral.
         """
@@ -1378,24 +1397,21 @@ class AngularClusteringPlots:
         self.fit_max_theta = fit_max_theta
 
         self.limber_test = limber_test
-        self.cosmo = cosmo
         self.limber_eps = limber_eps
         self.mag_bin_key = mag_bin_key
         self.limber_zmin = limber_zmin
         self.limber_zmax = limber_zmax
+
+        self.cosmo = cosmo
         if self.limber_test and self.cosmo is None:
-            raise ValueError(
-                "limber_test=True requires a `cosmo` object with .dc(z) "
-                "and .dxdz(z) methods."
-            )
-        if self.cosmo == 'default':
-            self.cosmo = FlatLambdaCDM(H0=100, Om0=0.3)
+            print("limber_test=True with no cosmo supplied -- using default "
+                  "flat LCDM (H0=70, Om0=0.3). Pass cosmo=... to override.")
+            self.cosmo = _DefaultFlatLCDM()
 
         self.selections_per_panel = {panel: [] for panel in range(num_panels)}
 
-        # Populated by plot_correlation_figure / _plot_correlation_function_subplot.
         # Structure: {panel_index: [ {selection, m, m_err, c, gamma,
-        #                              [r0, A_obs_rad, be_pars]} , ... ] }
+        #                              [r0, A_obs_rad, be_pars, mag_bin]} , ... ] }
         self.fit_results = {panel: [] for panel in range(num_panels)}
 
     def assign_results_to_panel(self, panel_index, selection_filters):
@@ -1406,9 +1422,6 @@ class AngularClusteringPlots:
         Each value in selection_filters may be either:
           - a single value   e.g. 'no ghostmask'
           - a list of values e.g. ['galaxy', 'galaxy/ambiguous', 'star']
-
-        A result matches a key if its selection[key] is equal to the scalar
-        value, or is contained in the list of values.
 
         Parameters
         ----------
@@ -1441,44 +1454,19 @@ class AngularClusteringPlots:
     # Limber scaling helpers
     # -----------------------------------------------------------------
 
-    def _get_mag_bin(self, selection: dict):
-        """
-        Extract a (mlo, mhi) magnitude-bin tuple from a selection dict, to
-        key into BE_PARAMS_BY_MAG_BIN.
-
-        Adapt this to however your selection dict actually encodes the
-        magnitude slice. Currently accepts, under self.mag_bin_key:
-          - a (mlo, mhi) tuple/list
-          - a string like '16-17', '16_17', '16 to 17'
-        """
-        raw = selection.get(self.mag_bin_key)
-        if raw is None:
-            raise KeyError(
-                f"selection has no '{self.mag_bin_key}' entry needed to "
-                f"look up BE params for the Limber test. Available keys: "
-                f"{list(selection.keys())}"
-            )
-        if isinstance(raw, (tuple, list)) and len(raw) == 2:
-            return (float(raw[0]), float(raw[1]))
-        if isinstance(raw, str):
-            s = raw.replace('to', '-').replace('_', '-')
-            parts = [p for p in s.split('-') if p.strip() != '']
-            if len(parts) == 2:
-                return (float(parts[0]), float(parts[1]))
-        raise ValueError(f"Could not parse magnitude bin from {raw!r}")
-
     def _run_limber_test(self, sel, gamma, c):
         """Compute Limber-predicted r0 for one fitted slice. Returns dict
-        with r0, A_obs_rad, be_pars, or None if params/cosmo unavailable."""
-        try:
-            mag_bin = self._get_mag_bin(sel)
-        except (KeyError, ValueError) as exc:
-            print(f"  Limber test skipped for {sel}: {exc}")
+        with r0, A_obs_rad, be_pars, mag_bin, or None if unavailable."""
+        mag_bin = sel.get(self.mag_bin_key)
+        if mag_bin is None:
+            print(f"  Limber test skipped for {sel}: no '{self.mag_bin_key}' "
+                  f"entry in selection.")
             return None
 
         be_pars = BE_PARAMS_BY_MAG_BIN.get(mag_bin)
         if be_pars is None:
-            print(f"  Limber test skipped: no BE params for mag bin {mag_bin}")
+            print(f"  Limber test skipped: no BE params for '{mag_bin}'. "
+                  f"Add it to BE_PARAMS_BY_MAG_BIN.")
             return None
 
         A_obs_deg = math.exp(c)          # amplitude with theta in degrees
@@ -1493,10 +1481,10 @@ class AngularClusteringPlots:
 
     def plot_limber_scaling(self, save_location=None, figsize=(6, 4)):
         """
-        Plot inferred r0 vs. magnitude-bin midpoint for every slice that had
-        a successful Limber test, across all panels. Flat r0 => amplitude
-        differences between slices are explained by N(z) dilution alone;
-        a trend => real clustering evolution (or eps is mis-set).
+        Plot inferred r0 vs. survey_depth-bin midpoint for every slice that
+        had a successful Limber test, across all panels. Flat r0 => the
+        amplitude differences between slices are explained by N(z) dilution
+        alone; a trend => real clustering evolution (or eps is mis-set).
         """
         if not self.limber_test:
             raise RuntimeError(
@@ -1511,7 +1499,10 @@ class AngularClusteringPlots:
             for e in entries:
                 if e.get('r0') is None or not np.isfinite(e.get('r0', np.nan)):
                     continue
-                mlo, mhi = e['mag_bin']
+                edges = _parse_bin_edges(e['mag_bin'])
+                if edges is None:
+                    continue
+                mlo, mhi = edges
                 mids.append(0.5 * (mlo + mhi))
                 r0s.append(e['r0'])
             if mids:
@@ -1527,7 +1518,7 @@ class AngularClusteringPlots:
             plt.close(fig)
             return None
 
-        ax.set_xlabel('magnitude')
+        ax.set_xlabel('mag / Z')
         ax.set_ylabel(r'inferred $r_0$ [Mpc]')
         ax.legend(fontsize=7)
         ax.grid()
@@ -1549,9 +1540,6 @@ class AngularClusteringPlots:
         Returns
         -------
         fig, axes, fit_results
-            fit_results is the same dict as self.fit_results, provided here
-            for convenience: {panel_index: [ {selection, m, m_err, c, gamma,
-            [r0, A_obs_rad, be_pars, mag_bin]}, ... ]}
         """
         ncols = ncols or self.num_panels
         nrows = int(np.ceil(self.num_panels / ncols))
@@ -1564,7 +1552,6 @@ class AngularClusteringPlots:
         )
         axes_flat = axes.flatten()
 
-        # reset fit results each time we (re)draw
         self.fit_results = {panel: [] for panel in range(self.num_panels)}
 
         for panel_idx in range(self.num_panels):
@@ -1598,15 +1585,6 @@ class AngularClusteringPlots:
         return fig, axes, self.fit_results
 
     def _fit_power_law(self, meanlogr, xi_raw, varxi_raw):
-        """
-        Fit log(xi) = m * log(theta) + c, replicating the standalone fitting
-        script: restrict to theta < fit_max_theta, xi > 0, varxi > 0, and
-        propagate errors via Var[log(xi)] ~= Var[xi] / xi^2.
-
-        Returns None if there isn't enough data to fit, otherwise a dict with
-        m, m_err, c, gamma, and the (log_r, log_xi, sigma_logxi) arrays that
-        were actually used, so the fit line / points can be drawn.
-        """
         meanlogr = np.asarray(meanlogr)
         xi_raw = np.asarray(xi_raw)
         varxi_raw = np.asarray(varxi_raw)
@@ -1653,14 +1631,8 @@ class AngularClusteringPlots:
         }
 
     def _plot_correlation_function_subplot(self, ax, clustering_result_per_plot, panel_idx=None):
-        """
-        Plot one or more w(theta) curves on a single Axes.
-        """
         panel_title, title_value_set = _build_panel_title(clustering_result_per_plot)
 
-        # Deterministic ordering: depends only on the selection contents, not
-        # on the order results were matched/appended in, so the same inputs
-        # always produce the same left-to-right / legend ordering.
         clustering_result_per_plot = sorted(
             clustering_result_per_plot,
             key=_selection_sort_key,
@@ -1687,11 +1659,8 @@ class AngularClusteringPlots:
                 pos_mask = np.ones_like(xi, dtype=bool)
 
             ra_strip = sel.get('ra_strip')
-
             colour = _colour_for_strip(ra_strip) if ra_strip is not None else None
 
-            # Do the fit (if requested) before plotting so we can append the
-            # gamma value onto the legend label.
             fit = None
             if self.plot_fit:
                 fit = self._fit_power_law(meanlogr, xi, varxi)
@@ -1726,9 +1695,9 @@ class AngularClusteringPlots:
                 r[pos_mask], xi[pos_mask],
                 label=label,
                 linestyle=linestyle,
-                color=colour,   # None falls back to the matplotlib cycle
+                color=colour,
             )
-            colour = line.get_color()  # grab whatever colour the cycle assigned
+            colour = line.get_color()
             ax.errorbar(
                 r[pos_mask], xi[pos_mask],
                 yerr=np.sqrt(varxi[pos_mask]),
@@ -1736,8 +1705,6 @@ class AngularClusteringPlots:
             )
 
             if fit is not None:
-                # Transform the log-log fit back into linear r / xi space so
-                # it overlays correctly on the (log-scaled) axes.
                 log_r_min = fit['log_r'].min()
                 log_r_max = fit['log_r'].max()
                 fit_r  = np.exp([log_r_min, log_r_max])
