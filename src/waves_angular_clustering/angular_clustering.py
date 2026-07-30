@@ -106,7 +106,7 @@ class WavesWideClustering:
     def __init__(self, n_photom_filepath=None, s_photom_filepath=None,
                  n_stargal_filepath=None, s_stargal_filepath=None,
                  n_randoms_filepath=None, s_randoms_filepath=None,
-                 results_directory=None, photom_type='total',
+                 results_directory=None, photom_type='colour',
                  additional_masking=False, mask_rectangles_filepath=None):
 
         self.n_photom_filepath = n_photom_filepath
@@ -155,6 +155,11 @@ class WavesWideClustering:
         # its own height, split evenly on each side (so it stays centred on
         # the original box). Set to 0 for no padding.
         self.mask_rectangle_buffer_frac = 0.1
+        # Dec value (degrees) used to split the mask rectangle catalogue into
+        # 'north' / 'south' subsets so that, e.g., WWN only ever gets queried
+        # against rectangles that could plausibly overlap it, rather than the
+        # full (possibly much larger) combined catalogue.
+        self.mask_hemisphere_dec_split = -15.0
         # Cached rectangle arrays — populated lazily on first use via
         # _load_mask_rectangles(), so the (potentially large) JSON file is
         # only read once regardless of how many selections are run.
@@ -162,6 +167,9 @@ class WavesWideClustering:
         self._mask_rect_ra_max = None
         self._mask_rect_dec_min = None
         self._mask_rect_dec_max = None
+        # Cache of boolean hemisphere-selection arrays, keyed by 'north' /
+        # 'south', so the dec-split comparison is only computed once each.
+        self._mask_rect_hemisphere_cache = {}
 
         self.data_ra_col = 'RAmax'
         self.data_dec_col = 'Decmax'
@@ -404,25 +412,72 @@ class WavesWideClustering:
         self._mask_rect_dec_max = dec_max
         print(f"  Loaded {len(rectangles)} mask rectangles (buffer_frac={buf}).")
 
-    def _apply_rectangle_mask(self, ra, dec, chunk_size=50_000):
+    def _get_rectangle_selection_for_hemisphere(self, hemisphere):
+        """
+        Return a boolean array (into the cached mask-rectangle arrays)
+        selecting only the rectangles relevant to `hemisphere`. Cached per
+        hemisphere so the comparison is only done once. `hemisphere=None`
+        returns all rectangles (no filtering).
+        """
+        if hemisphere is None:
+            return np.ones(len(self._mask_rect_ra_min), dtype=bool)
+
+        if hemisphere in self._mask_rect_hemisphere_cache:
+            return self._mask_rect_hemisphere_cache[hemisphere]
+
+        split = self.mask_hemisphere_dec_split
+        dec_min = self._mask_rect_dec_min
+        dec_max = self._mask_rect_dec_max
+
+        if hemisphere == 'north':
+            # Keep rectangles that overlap the north region at all (i.e.
+            # any part of the rectangle lies above the split).
+            sel = dec_max > split
+        elif hemisphere == 'south':
+            sel = dec_min <= split
+        else:
+            raise ValueError(
+                f"Unknown hemisphere: '{hemisphere}'. Expected 'north', 'south', or None."
+            )
+
+        self._mask_rect_hemisphere_cache[hemisphere] = sel
+        print(
+            f"  Filtered mask rectangles to hemisphere='{hemisphere}' "
+            f"(dec split={split}): {sel.sum()} / {len(sel)} rectangles."
+        )
+        return sel
+
+    def _apply_rectangle_mask(self, ra, dec, hemisphere=None):
         """
         Return a boolean keep-mask (True = keep) for the given RA/Dec points,
         flagging (and removing) any point that falls inside one of the
         rectangles loaded from self.mask_rectangles_filepath.
 
-        Points are processed in chunks (rather than all at once against all
-        rectangles) to bound peak memory usage, since the full point-by-
-        rectangle comparison matrix can otherwise become very large.
+        `hemisphere` ('north', 'south', or None) restricts the rectangle
+        catalogue to just the subset that could plausibly overlap this
+        data (split on self.mask_hemisphere_dec_split), avoiding wasted
+        query_ball_point calls against rectangles nowhere near this region.
+
+        Rather than comparing every point against every rectangle (an
+        N_points x N_rectangles brute force that becomes intractable once
+        the rectangle catalogue has tens of thousands of entries — e.g.
+        56M points x 24k rectangles is ~10^12 comparisons), this builds a
+        single spatial index over the (large) point catalogue and then does
+        one cheap radius query per rectangle (of which there are comparatively
+        few). Each query returns only the points near that rectangle, which
+        are then exactly tested against its true (rectangular, not circular)
+        bounds.
         """
         self._load_mask_rectangles()
 
         ra = np.asarray(ra)
         dec = np.asarray(dec)
 
-        ra_min = self._mask_rect_ra_min
-        ra_max = self._mask_rect_ra_max
-        dec_min = self._mask_rect_dec_min
-        dec_max = self._mask_rect_dec_max
+        rect_sel = self._get_rectangle_selection_for_hemisphere(hemisphere)
+        ra_min = self._mask_rect_ra_min[rect_sel]
+        ra_max = self._mask_rect_ra_max[rect_sel]
+        dec_min = self._mask_rect_dec_min[rect_sel]
+        dec_max = self._mask_rect_dec_max[rect_sel]
 
         n = len(ra)
         keep = np.ones(n, dtype=bool)
@@ -430,22 +485,33 @@ class WavesWideClustering:
         if len(ra_min) == 0:
             return keep
 
-        for start in range(0, n, chunk_size):
-            end = min(start + chunk_size, n)
-            ra_chunk = ra[start:end][:, None]
-            dec_chunk = dec[start:end][:, None]
+        print(f"  Building spatial index over {n} points for rectangle masking ({hemisphere or 'all'})...")
+        points = np.column_stack([ra, dec])
+        tree = cKDTree(points)
 
+        rect_centers = np.column_stack([
+            (ra_min + ra_max) / 2.0,
+            (dec_min + dec_max) / 2.0,
+        ])
+        # Enclosing-circle radius for each rectangle (half the diagonal) —
+        # a cheap first-pass candidate filter ahead of the exact box test.
+        rect_radii = 0.5 * np.sqrt((ra_max - ra_min) ** 2 + (dec_max - dec_min) ** 2)
+
+        print(f"  Querying {len(ra_min)} rectangles against the point index...")
+        for idx in range(len(ra_min)):
+            candidate_idx = tree.query_ball_point(rect_centers[idx], r=rect_radii[idx])
+            if not candidate_idx:
+                continue
+            candidate_idx = np.asarray(candidate_idx)
             inside = (
-                (ra_chunk >= ra_min[None, :]) &
-                (ra_chunk <= ra_max[None, :]) &
-                (dec_chunk >= dec_min[None, :]) &
-                (dec_chunk <= dec_max[None, :])
+                (ra[candidate_idx] >= ra_min[idx]) & (ra[candidate_idx] <= ra_max[idx]) &
+                (dec[candidate_idx] >= dec_min[idx]) & (dec[candidate_idx] <= dec_max[idx])
             )
-            keep[start:end] = ~inside.any(axis=1)
+            keep[candidate_idx[inside]] = False
 
         return keep
 
-    def _load_dataset(self, photom_filepath, stargal_filepath, selection):
+    def _load_dataset(self, photom_filepath, stargal_filepath, selection, hemisphere=None):
         print(f"  Loading photometric data from {photom_filepath}...")
         df = pd.read_parquet(photom_filepath, columns=self.columns_to_load_photom)
         print(f"  Loaded {len(df)} rows from photometric catalogue.")
@@ -491,7 +557,8 @@ class WavesWideClustering:
         if self.additional_masking:
             print("  Applying rectangle-based additional mask...")
             additional_keep_mask = self._apply_rectangle_mask(
-                df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy()
+                df[self.data_ra_col].to_numpy(), df[self.data_dec_col].to_numpy(),
+                hemisphere=hemisphere,
             )
             n_flagged = (~additional_keep_mask).sum()
             print(f"  Additional masking flags {n_flagged} / {len(df)} sources as inside a masked rectangle.")
@@ -616,7 +683,7 @@ class WavesWideClustering:
 
         return ra_data, dec_data
 
-    def _load_randoms(self, randoms_filepath, selection):
+    def _load_randoms(self, randoms_filepath, selection, hemisphere=None):
         print(f"  Loading randoms from {randoms_filepath} with selection {selection}...")
         df = pd.read_parquet(randoms_filepath, columns=self.columns_to_load_randoms)
 
@@ -637,6 +704,7 @@ class WavesWideClustering:
             additional_keep_mask = self._apply_rectangle_mask(
                 df[self.randoms_ra_col].to_numpy(),
                 df[self.randoms_dec_col].to_numpy(),
+                hemisphere=hemisphere,
             )
             n_flagged = (~additional_keep_mask).sum()
             print(f"  Additional masking flags {n_flagged} / {len(df)} random points as inside a masked rectangle.")
@@ -658,17 +726,17 @@ class WavesWideClustering:
     def _load_WWC_data(self, selection):
         """Load and concatenate north + south data for the WW combined region."""
         ra_n, dec_n = self._load_dataset(
-            self.n_photom_filepath, self.n_stargal_filepath, selection
+            self.n_photom_filepath, self.n_stargal_filepath, selection, hemisphere='north'
         )
         ra_s, dec_s = self._load_dataset(
-            self.s_photom_filepath, self.s_stargal_filepath, selection
+            self.s_photom_filepath, self.s_stargal_filepath, selection, hemisphere='south'
         )
         return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
 
     def _load_WWC_randoms(self, selection):
         """Load and concatenate north + south randoms for the WW combined region."""
-        ra_n, dec_n = self._load_randoms(self.n_randoms_filepath, selection)
-        ra_s, dec_s = self._load_randoms(self.s_randoms_filepath, selection)
+        ra_n, dec_n = self._load_randoms(self.n_randoms_filepath, selection, hemisphere='north')
+        ra_s, dec_s = self._load_randoms(self.s_randoms_filepath, selection, hemisphere='south')
         return np.concatenate([ra_n, ra_s]), np.concatenate([dec_n, dec_s])
 
     # ---------------------------------------------------------------------- #
@@ -717,8 +785,9 @@ class WavesWideClustering:
         else:
             print("  Loading data and randoms...")
             photom_fp, stargal_fp, randoms_fp = self._get_filepaths_for_selection(selection)
-            ra_data, dec_data = self._load_dataset(photom_fp, stargal_fp, selection)
-            ra_rand, dec_rand = self._load_randoms(randoms_fp, selection)
+            hemisphere = 'north' if region == 'WWN' else 'south' if region == 'WWS' else None
+            ra_data, dec_data = self._load_dataset(photom_fp, stargal_fp, selection, hemisphere=hemisphere)
+            ra_rand, dec_rand = self._load_randoms(randoms_fp, selection, hemisphere=hemisphere)
             print(f"  Loaded {len(ra_data)} data points and {len(ra_rand)} randoms.")
 
         self._diagnose_catalog("Data and Randoms", ra_data, dec_data, ra_rand, dec_rand)
