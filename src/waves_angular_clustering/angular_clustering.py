@@ -208,7 +208,7 @@ class WavesWideClustering:
             'survey_depth':       ['Z<21.1', 'Z<21.25', 'Z<22',
                                    '16<Z<17', '17<Z<18', '18<Z<19', '19<Z<20', '20<Z<21', '21<Z<22',
                                    '16<Z<17.5', '17.5<Z<19', '19<Z<19.75', '19.75<Z<20.5',
-                                   '20.5<Z<21.25', '21.25<Z<22'],
+                                   '20.5<Z<21.25', '21.25<Z<22', '17.5<Z<18.5', '18.5<Z<19.5', '19.5<Z<20.5'],
             'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
             'region':             ['WWN', 'WWS', 'WW combined'],
         }
@@ -220,10 +220,11 @@ class WavesWideClustering:
         #    'star_gal_method':    ['TOPZ/SFM/R50', 'baseline'],
         #    'region':             ['WWN', 'WWS'],
         #}
+        # 17.5 18.5, 18.5, 19.5, 19.5 20.5 
         selections_to_run = {
             'target_selection':   ['galaxy'],
             'ghostmask_selection':['with ghostmask'],
-            'survey_depth':       ['16<Z<17.5', '17.5<Z<19', '19<Z<19.75', '19.75<Z<20.5', '20.5<Z<21.25', '21.25<Z<22'],
+            'survey_depth':       ['16<Z<17.5', '17.5<Z<18.5', '18.5<Z<19.5', '19.5<Z<20.5', '20.5<Z<21.25', '21.25<Z<22'],
             'star_gal_method':    ['TOPZ/SFM/R50'],
             'region':             ['WWN', 'WWS'],
         }
@@ -635,6 +636,12 @@ class WavesWideClustering:
                 base_selection &= (df['mag_Zt'] > 20.5) & (df['mag_Zt'] < 21.25)
             elif depth == '21.25<Z<22':
                 base_selection &= (df['mag_Zt'] > 21.25) & (df['mag_Zt'] < 22)
+            elif depth == '17.5<Z<18.5':
+                base_selection &= (df['mag_Zt'] > 17.5) & (df['mag_Zt'] < 18.5)
+            elif depth == '18.5<Z<19.5':
+                base_selection &= (df['mag_Zt'] > 18.5) & (df['mag_Zt'] < 19.5)
+            elif depth == '19.5<Z<20.5':
+                base_selection &= (df['mag_Zt'] > 19.5) & (df['mag_Zt'] < 20.5)
 
         elif self.photom_type == 'colour':
             print("using colour photometry for selection")
@@ -673,6 +680,12 @@ class WavesWideClustering:
                 base_selection &= (df['mag_Zc'] > 20.5) & (df['mag_Zc'] < 21.25)
             elif depth == '21.25<Z<22':
                 base_selection &= (df['mag_Zc'] > 21.25) & (df['mag_Zc'] < 22)
+            elif depth == '17.5<Z<18.5':
+                base_selection &= (df['mag_Zc'] > 17.5) & (df['mag_Zc'] < 18.5)
+            elif depth == '18.5<Z<19.5':
+                base_selection &= (df['mag_Zc'] > 18.5) & (df['mag_Zc'] < 19.5)
+            elif depth == '19.5<Z<20.5':
+                base_selection &= (df['mag_Zc'] > 19.5) & (df['mag_Zc'] < 20.5)
 
             print(f"  Applied colour-based selection with photom_type='{self.photom_type}'.")
         print(f"  Number of objects after selection: {base_selection.sum()}")
