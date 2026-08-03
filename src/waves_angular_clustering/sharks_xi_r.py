@@ -1,56 +1,111 @@
+"""
+Measure the real-space 3D correlation function xi(r) for a WAVES-like mock
+(WAVESwide or WAVESdeep selections), using real-space (redshift_cosmological)
+positions, Landy-Szalay estimator, and 10-region jackknife errors.
+
+NEW: for region='deep', you can now split the sample into Z-band apparent
+magnitude slices (mag_Z_VISTA) and get xi(r) + jackknife errors for each
+slice separately. This is useful for the shark/WAVES-deep mock where you
+want to see how clustering evolves with (roughly) magnitude/luminosity/depth.
+
+Dependencies:
+    pip install Corrfunc astropy scikit-learn pandas pyarrow numpy
+
+Usage:
+    # full deep sample, single xi(r) (old behaviour)
+    python measure_xi_r.py --input mock.parquet --region deep --outdir ./xi_output
+
+    # full wide sample
+    python measure_xi_r.py --input mock.parquet --region wide --outdir ./xi_output
+
+    # deep sample split into the 5 standard Z-mag slices
+    python measure_xi_r.py --input mock.parquet --region deep --outdir ./xi_output --magslices
+
+    # deep sample, one custom magnitude slice
+    python measure_xi_r.py --input mock.parquet --region deep --outdir ./xi_output --magmin 18.5 --magmax 19.5
+
+NOTE ON COSMOLOGY:
+    get_cosmology() below sets H0=100 so that comoving distances come out
+    directly in Mpc/h. Check that Om0 (and any other params) match the
+    fiducial cosmology used to build your mock -- getting this wrong will
+    bias xi(r) and, more importantly, your comparison to any theory/HOD
+    prediction computed in the "true" cosmology.
+"""
+
+import os
+import argparse
 import numpy as np
-import mpmath
 import pandas as pd
-from scipy.optimize import curve_fit
-from scipy.special import gamma
-from astropy.cosmology import LambdaCDM
-from astropy import units as u
-import matplotlib.pyplot as plt
+
+from astropy.cosmology import FlatLambdaCDM
+from sklearn.cluster import KMeans
+
+from Corrfunc.theory import DD
+from Corrfunc.utils import convert_3d_counts_to_cf
 
 
-def find_adaptive_zmax(model, mlo, mhi, tol=1e-4, z_start=0.2, growth=1.5, cap=2.0, n_probe=1000):
+# --------------------------------------------------------------------------
+# Footprints
+# --------------------------------------------------------------------------
+
+# WAVES-wide sub-regions: (ra_min, ra_max, dec_min, dec_max)
+WW_N = (157.25, 225.0, -3.95, 3.95)
+WW_S = (330.0, 51.6, -35.6, -27.0)   # wraps through RA = 0/360
+
+# WAVES-deep region
+WD = (339.0, 351.0, -35.0, -30.0)
+
+# Standard Z-band (mag_Z_VISTA) magnitude slices for the WAVES-deep / shark
+# deep mock. Each tuple is (mag_min, mag_max), applied as mag_min <= mag < mag_max.
+MAG_SLICES = [
+    (16.0, 17.5),
+    (17.5, 18.5),
+    (18.5, 19.5),
+    (19.5, 20.5),
+    (20.5, 21.25),
+]
+
+
+def in_box(ra, dec, ra_min, ra_max, dec_min, dec_max):
+    """RA/Dec box mask, correctly handling RA wraparound (ra_min > ra_max)."""
+    if ra_min < ra_max:
+        ra_mask = (ra >= ra_min) & (ra <= ra_max)
+    else:
+        ra_mask = (ra >= ra_min) | (ra <= ra_max)
+    dec_mask = (dec >= dec_min) & (dec <= dec_max)
+    return ra_mask & dec_mask
+
+
+def in_wide_footprint(ra, dec):
+    return in_box(ra, dec, *WW_N) | in_box(ra, dec, *WW_S)
+
+
+def box_solid_angle(ra_min, ra_max, dec_min, dec_max):
+    """Solid angle of an RA/Dec box in steradians (handles RA wrap)."""
+    if ra_min < ra_max:
+        dra = ra_max - ra_min
+    else:
+        dra = (360.0 - ra_min) + ra_max
+    dra_rad = np.radians(dra)
+    sin_dec_min = np.sin(np.radians(dec_min))
+    sin_dec_max = np.sin(np.radians(dec_max))
+    return dra_rad * (sin_dec_max - sin_dec_min)
+
+
+# --------------------------------------------------------------------------
+# Selection
+# --------------------------------------------------------------------------
+
+def apply_selection(df, region, mag_min=None, mag_max=None):
     """
-    Find the SMALLEST z_max (starting from z_start, growing by `growth`
-    each step) such that the mass beyond 0.9*z_max is a negligible
-    fraction (tol) of the slice's total predicted mass -- i.e. find the
-    grid extent that actually CONTAINS the distribution, without
-    assuming any particular slice needs a wide range. z_start is
-    intentionally small (0.2) so narrow, bright-slice distributions
-    settle on a correspondingly small z_max (better peak resolution for
-    a fixed n_points) rather than always growing outward from a
-    z_start=1.0 floor regardless of whether that slice needed it.
+    Apply the base WAVES-wide / WAVES-deep selection.
+
+    mag_min / mag_max (optional): further restrict mag_Z_VISTA to
+    [mag_min, mag_max) *on top of* the region's own magnitude limit. This is
+    how the Z-magnitude slices for the deep mock are implemented -- the
+    region cut (e.g. mag_Z_VISTA < 21.25 for deep) still applies, the slice
+    just narrows it further.
     """
-    z_max = z_start
-    for _ in range(40):
-        z_probe = np.linspace(1e-4, z_max, n_probe)
-        dNdz = model.predict_dNdz_slice(z_probe, mlo, mhi, area_deg2=1.0)
-        total = np.trapezoid(dNdz, z_probe)
-        if total <= 0:
-            z_max *= growth
-            continue
-        tail_mass = np.trapezoid(
-            dNdz[z_probe >= 0.9 * z_max], z_probe[z_probe >= 0.9 * z_max]
-        )
-        if tail_mass / total < tol or z_max >= cap:
-            return min(z_max, cap)
-        z_max *= growth
-    return z_max
-
-
-# =====================================================================
-# SHARKS mock loading (WAVES-Deep-sized region, complete to z = 0.8)
-# =====================================================================
-WD = (339.0, 351.0, -35.0, -30.0)   # (ra_min, ra_max, dec_min, dec_max) deg
-
-
-def survey_area_deg2(ra_min, ra_max, dec_min, dec_max):
-    """Exact spherical area of an RA/Dec rectangle, in deg^2."""
-    dra = np.deg2rad(ra_max - ra_min)
-    area_sr = dra * (np.sin(np.deg2rad(dec_max)) - np.sin(np.deg2rad(dec_min)))
-    return area_sr * (180.0 / np.pi) ** 2
-
-
-def apply_selection(df, region):
     df = df.copy()
     df['mass_stellar_total'] = np.log10(df['mass_stellar_total'])
 
@@ -58,7 +113,7 @@ def apply_selection(df, region):
 
     if region == 'wide':
         mask = mask & (df['mag_Z_VISTA'] < 21.1) & (df['redshift_observed'] < 0.2)
-        mask = mask & in_wide_footprint(df['ra'].values, df['dec'].values)  # noqa: F821
+        mask = mask & in_wide_footprint(df['ra'].values, df['dec'].values)
     elif region == 'deep':
         mask = (
             mask
@@ -70,483 +125,392 @@ def apply_selection(df, region):
     else:
         raise ValueError(f"Unknown region '{region}', must be 'wide' or 'deep'")
 
+    if mag_min is not None:
+        mask = mask & (df['mag_Z_VISTA'] >= mag_min)
+    if mag_max is not None:
+        mask = mask & (df['mag_Z_VISTA'] < mag_max)
+
     return df.loc[mask].reset_index(drop=True)
 
 
-def load_sharks_mock(parquet_path, region="deep"):
+# --------------------------------------------------------------------------
+# Randoms
+# --------------------------------------------------------------------------
+
+def sample_box_randoms(n, ra_min, ra_max, dec_min, dec_max, rng):
+    """Uniform-on-sky sampling within an RA/Dec box (great-circle correct),
+    handling RA wraparound."""
+    if ra_min < ra_max:
+        ra = rng.uniform(ra_min, ra_max, n)
+    else:
+        width = (360.0 - ra_min) + ra_max
+        ra = (rng.uniform(0.0, width, n) + ra_min) % 360.0
+
+    # uniform in sin(dec) -> uniform sky density, not uniform in dec itself
+    sin_dec_min = np.sin(np.radians(dec_min))
+    sin_dec_max = np.sin(np.radians(dec_max))
+    sin_dec = rng.uniform(sin_dec_min, sin_dec_max, n)
+    dec = np.degrees(np.arcsin(sin_dec))
+    return ra, dec
+
+
+def generate_randoms(data_df, region, factor=20, seed=None):
+    rng = np.random.default_rng(seed)
+    n_total = int(factor * len(data_df))
+
+    if region == 'deep':
+        ra, dec = sample_box_randoms(n_total, *WD, rng=rng)
+
+    elif region == 'wide':
+        omega_n = box_solid_angle(*WW_N)
+        omega_s = box_solid_angle(*WW_S)
+        frac_n = omega_n / (omega_n + omega_s)
+        n_n = int(round(n_total * frac_n))
+        n_s = n_total - n_n
+
+        ra_n, dec_n = sample_box_randoms(n_n, *WW_N, rng=rng)
+        ra_s, dec_s = sample_box_randoms(n_s, *WW_S, rng=rng)
+        ra = np.concatenate([ra_n, ra_s])
+        dec = np.concatenate([dec_n, dec_s])
+
+    else:
+        raise ValueError(f"Unknown region '{region}'")
+
+    # reshuffle redshifts: resample (with replacement) from the data's own
+    # n(z) to reproduce the selection function without an explicit model.
+    # NOTE: for magnitude slices this means the randoms' n(z) tracks the
+    # n(z) of that particular slice, which is the correct thing to do -- a
+    # brighter/nearer slice and a fainter/deeper slice have different n(z)
+    # and each needs its own randoms.
+    z = rng.choice(data_df['redshift_cosmological'].values, size=len(ra), replace=True)
+
+    return pd.DataFrame({'ra': ra, 'dec': dec, 'redshift_cosmological': z})
+
+
+# --------------------------------------------------------------------------
+# Coordinates
+# --------------------------------------------------------------------------
+
+def get_cosmology():
+    # H0=100 -> comoving_distance() returns Mpc/h directly.
+    # CHECK Om0 matches your mock's fiducial cosmology.
+    return FlatLambdaCDM(H0=100.0, Om0=0.3121)
+
+
+def to_cartesian(ra_deg, dec_deg, z, cosmo):
+    ra = np.radians(ra_deg)
+    dec = np.radians(dec_deg)
+    d_c = cosmo.comoving_distance(z).value  # Mpc/h
+    x = d_c * np.cos(dec) * np.cos(ra)
+    y = d_c * np.cos(dec) * np.sin(ra)
+    zc = d_c * np.sin(dec)
+    return x, y, zc
+
+
+# --------------------------------------------------------------------------
+# Jackknife regions (KMeans on the unit sphere -- robust to RA wrap)
+# --------------------------------------------------------------------------
+
+def _unit_vec(ra, dec):
+    # Force float64 regardless of input dtype. Parquet columns are often
+    # float32, while the randoms (built with np.random / np.degrees /
+    # np.arcsin) come out float64 -- feeding KMeans.fit() float32 data and
+    # then .predict() float64 data (or vice versa) raises a Cython buffer
+    # dtype mismatch, since sklearn's KMeans keeps cluster_centers_ in
+    # whatever dtype it was fit on.
+    ra_r = np.radians(np.asarray(ra, dtype=np.float64))
+    dec_r = np.radians(np.asarray(dec, dtype=np.float64))
+    return np.column_stack([
+        np.cos(dec_r) * np.cos(ra_r),
+        np.cos(dec_r) * np.sin(ra_r),
+        np.sin(dec_r),
+    ])
+
+
+def assign_jackknife_regions(data_ra, data_dec, rand_ra, rand_dec, region,
+                              n_regions=10, seed=42):
     """
-    Load the SHARKS lightcone mock and apply the WAVES selection.
-    NOTE: the 'deep' region is complete only to z = 0.8 and Z < 21.25,
-    over the WD footprint (~50.6 deg^2) -- comparisons against the
-    forward model must respect both limits.
+    Returns (data_labels, rand_labels, n_regions_actual).
+
+    'deep' is a single contiguous field, so a single KMeans run over all
+    points is fine. This is re-run per magnitude slice (since each slice
+    has its own galaxy positions), which is what you want -- the jackknife
+    footprint should be re-tiled to the actual points being used.
+
+    'wide' is two disjoint fields (WW-N, WW-S) separated by tens of
+    degrees. Running one global KMeans over both risks an uneven N/S
+    split (however many clusters happen to minimize total variance),
+    which breaks the equal-sized-region assumption behind the delete-one
+    jackknife covariance. Instead we force WW-N and WW-S to each get
+    round(n_regions / 2) regions, clustered independently, with WW-S
+    labels offset so the two fields never share a label.
     """
+    if region == 'deep':
+        km = KMeans(n_clusters=n_regions, random_state=seed, n_init=10)
+        km.fit(_unit_vec(data_ra, data_dec))
+        data_labels = km.labels_
+        rand_labels = km.predict(_unit_vec(rand_ra, rand_dec))
+        return data_labels, rand_labels, n_regions
+
+    elif region == 'wide':
+        n_per_field = int(round(n_regions / 2))
+        n_total = 2 * n_per_field
+        if n_total != n_regions:
+            print(f"[wide] NOTE: requested n_jk={n_regions} is odd; forcing "
+                  f"{n_per_field} regions per field -> using {n_total} "
+                  f"jackknife regions total instead.")
+
+        data_in_n = in_box(data_ra, data_dec, *WW_N)
+        rand_in_n = in_box(rand_ra, rand_dec, *WW_N)
+        data_in_s = ~data_in_n
+        rand_in_s = ~rand_in_n
+
+        data_labels = np.full(len(data_ra), -1, dtype=int)
+        rand_labels = np.full(len(rand_ra), -1, dtype=int)
+
+        # WW-N -> labels 0 .. n_per_field-1
+        km_n = KMeans(n_clusters=n_per_field, random_state=seed, n_init=10)
+        km_n.fit(_unit_vec(data_ra[data_in_n], data_dec[data_in_n]))
+        data_labels[data_in_n] = km_n.labels_
+        rand_labels[rand_in_n] = km_n.predict(
+            _unit_vec(rand_ra[rand_in_n], rand_dec[rand_in_n])
+        )
+
+        # WW-S -> labels n_per_field .. 2*n_per_field-1
+        km_s = KMeans(n_clusters=n_per_field, random_state=seed, n_init=10)
+        km_s.fit(_unit_vec(data_ra[data_in_s], data_dec[data_in_s]))
+        data_labels[data_in_s] = km_s.labels_ + n_per_field
+        rand_labels[rand_in_s] = km_s.predict(
+            _unit_vec(rand_ra[rand_in_s], rand_dec[rand_in_s])
+        ) + n_per_field
+
+        assert (data_labels >= 0).all() and (rand_labels >= 0).all(), \
+            "some points were not assigned a jackknife region"
+        return data_labels, rand_labels, n_total
+
+    else:
+        raise ValueError(f"Unknown region '{region}'")
+
+
+def report_region_sizes(data_labels, rand_labels, n_regions):
+    """Print galaxy/random counts per jackknife region as a balance check."""
+    print("  jackknife region sizes (data / randoms):")
+    for i in range(n_regions):
+        nd = int((data_labels == i).sum())
+        nr = int((rand_labels == i).sum())
+        print(f"    region {i:2d}: {nd:6d} data, {nr:7d} randoms")
+
+
+# --------------------------------------------------------------------------
+# xi(r) via Corrfunc + Landy-Szalay
+# --------------------------------------------------------------------------
+
+def compute_xi(data_xyz, rand_xyz, r_edges, nthreads=4):
+    dx, dy, dz = data_xyz
+    rx, ry, rz = rand_xyz
+    ND, NR = len(dx), len(rx)
+
+    dd = DD(1, nthreads, r_edges, dx, dy, dz, periodic=False)
+    dr = DD(0, nthreads, r_edges, dx, dy, dz,
+            X2=rx, Y2=ry, Z2=rz, periodic=False)
+    rr = DD(1, nthreads, r_edges, rx, ry, rz, periodic=False)
+
+    xi = convert_3d_counts_to_cf(ND, ND, NR, NR, dd, dr, dr, rr, estimator='LS')
+    return np.asarray(xi)
+
+
+# --------------------------------------------------------------------------
+# Full pipeline (single sample: full region, or one magnitude slice)
+# --------------------------------------------------------------------------
+
+def run_pipeline(df, region, out_dir, r_edges, tag=None,
+                  mag_min=None, mag_max=None,
+                  factor=20, nthreads=4, n_jk=10, seed=42):
+    """
+    df: the already-loaded parquet DataFrame (loaded once and reused across
+        slices so we don't re-read the file from disk each time).
+    tag: label used in output filenames / log messages, e.g. 'deep' or
+         'deep_mag18.5-19.5'. Defaults to `region` if not given.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    tag = tag or region
+
+    data = apply_selection(df, region, mag_min=mag_min, mag_max=mag_max)
+    print(f"[{tag}] {len(data)} galaxies after selection")
+
+    if len(data) == 0:
+        print(f"[{tag}] WARNING: no galaxies in this slice, skipping.")
+        return None
+
+    randoms = generate_randoms(data, region, factor=factor, seed=seed)
+    print(f"[{tag}] generated {len(randoms)} randoms ({factor}x data)")
+
+    cosmo = get_cosmology()
+    dx, dy, dz = to_cartesian(data['ra'].values, data['dec'].values,
+                               data['redshift_cosmological'].values, cosmo)
+    rx, ry, rz = to_cartesian(randoms['ra'].values, randoms['dec'].values,
+                               randoms['redshift_cosmological'].values, cosmo)
+
+    print(f"[{tag}] computing full-sample xi(r) ...")
+    xi_full = compute_xi((dx, dy, dz), (rx, ry, rz), r_edges, nthreads=nthreads)
+
+    print(f"[{tag}] assigning {n_jk} jackknife regions ...")
+    data_labels, rand_labels, n_jk_actual = assign_jackknife_regions(
+        data['ra'].values, data['dec'].values,
+        randoms['ra'].values, randoms['dec'].values,
+        region, n_regions=n_jk, seed=seed
+    )
+    report_region_sizes(data_labels, rand_labels, n_jk_actual)
+
+    nbins = len(r_edges) - 1
+    xi_jk = np.zeros((n_jk_actual, nbins))
+    for i in range(n_jk_actual):
+        keep_d = data_labels != i
+        keep_r = rand_labels != i
+        xi_jk[i] = compute_xi(
+            (dx[keep_d], dy[keep_d], dz[keep_d]),
+            (rx[keep_r], ry[keep_r], rz[keep_r]),
+            r_edges, nthreads=nthreads
+        )
+        print(f"[{tag}] jackknife sample {i+1}/{n_jk_actual} done "
+              f"(dropped {(~keep_d).sum()} data, {(~keep_r).sum()} randoms)")
+
+    xi_jk_mean = xi_jk.mean(axis=0)
+    diff = xi_jk - xi_jk_mean
+    cov = (n_jk_actual - 1) / n_jk_actual * (diff.T @ diff)
+    err = np.sqrt(np.diag(cov))
+
+    r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
+
+    out_npz = os.path.join(out_dir, f'xi_r_{tag}.npz')
+    np.savez(out_npz,
+             r_edges=r_edges, r_centers=r_centers,
+             xi=xi_full, xi_jackknife=xi_jk, cov=cov, err=err,
+             n_data=len(data), n_random=len(randoms),
+             mag_min=np.nan if mag_min is None else mag_min,
+             mag_max=np.nan if mag_max is None else mag_max)
+
+    out_csv = os.path.join(out_dir, f'xi_r_{tag}.csv')
+    pd.DataFrame({'r_Mpc_h': r_centers, 'xi': xi_full, 'xi_err_jk': err}).to_csv(out_csv, index=False)
+
+    print(f"[{tag}] saved: {out_npz}")
+    print(f"[{tag}] saved: {out_csv}")
+    return {
+        'tag': tag, 'mag_min': mag_min, 'mag_max': mag_max,
+        'r_centers': r_centers, 'xi': xi_full, 'err': err, 'cov': cov,
+        'n_data': len(data), 'n_random': len(randoms),
+    }
+
+
+# --------------------------------------------------------------------------
+# Driver: full sample, one custom slice, or all standard mag slices
+# --------------------------------------------------------------------------
+
+def load_data(parquet_path):
     cols = ['ra', 'dec', 'redshift_cosmological', 'redshift_observed',
             'mass_stellar_total', 'mag_Z_VISTA']
-    df = pd.read_parquet(parquet_path, columns=cols)
-    return apply_selection(df, region)
+    return pd.read_parquet(parquet_path, columns=cols)
 
 
-def load_waves_n_photoz(photoz_filepath, photom_filepath, stargal_filepath):
+def run_mag_slices(parquet_path, region, out_dir, r_edges, mag_slices=MAG_SLICES,
+                    factor=20, nthreads=4, n_jk=10, seed=42):
     """
-    Load WAVES-N photometry and photo-zs, and merge in the star/galaxy
-    separation flags from the stargal catalogue.
+    Run the full jackknife xi(r) pipeline separately for each (mag_min, mag_max)
+    slice in `mag_slices`, reusing a single load of the parquet file. Writes
+    one npz/csv per slice, plus a combined summary CSV across all slices.
     """
-    df_photoz = pd.read_parquet(photoz_filepath)
-    df_photom = pd.read_parquet(photom_filepath)
-    df_stargal = pd.read_parquet(stargal_filepath)
+    if region != 'deep':
+        raise ValueError("Magnitude slicing is currently only wired up for "
+                          "region='deep' (the shark/WAVES-deep mock).")
 
-    # merge in the star/galaxy separation flags
-    df = df_photoz.merge(df_stargal[["TARGETID", "stargal_flag"]], on="TARGETID", how="left")
-    df = df.merge(df_photom[["TARGETID", "Z", "Z_1", "Z_2"]], on="TARGETID", how="left")
-    return df
+    df = load_data(parquet_path)
+    results = []
+    for mag_min, mag_max in mag_slices:
+        tag = f'{region}_mag{mag_min:.2f}-{mag_max:.2f}'
+        res = run_pipeline(
+            df, region, out_dir, r_edges, tag=tag,
+            mag_min=mag_min, mag_max=mag_max,
+            factor=factor, nthreads=nthreads, n_jk=n_jk, seed=seed,
+        )
+        if res is not None:
+            results.append(res)
 
-
-# =====================================================================
-# 1. Forward model: evolving Schechter LF -> predicted dN/dz
-# =====================================================================
-class SchechterNzModel:
-    """
-    Forward-models dN/dz for a flux-limited sample from an evolving
-    Schechter luminosity function.
-
-    Provides both the cumulative flux-limited prediction (all galaxies
-    brighter than a single apparent-magnitude limit) and the sliced
-    prediction (galaxies within an apparent-magnitude range), the
-    latter being what's needed to build synthetic n(z | m) histograms
-    analogous to real catalogue data.
-    """
-
-    def __init__(
-        self,
-        H0=100.0, Om0=0.3, Ode0=0.7,
-        Mstar0=-21.814943193345457,
-        alpha=-1.3166859304357672,
-        phistar0=0.004938332759020672,   # Mpc^-3 mag^-1 (h=1)
-        P=1.625,       # density evolution
-        Q=-0.07875,    # luminosity evolution
-        Mmin=-24.25, Mmax=-13.5,          # valid abs-mag range of the LF fit
-        zfit_max=0.5,                      # valid redshift range of the LF fit
-        freeze_evolution=True,             # freeze M*(z), phi*(z) beyond zfit_max
-        kcorr=None,
-    ):
-        self.cosmo = LambdaCDM(H0=H0, Om0=Om0, Ode0=Ode0)
-        self.Mstar0 = Mstar0
-        self.alpha = alpha
-        self.phistar0 = phistar0
-        self.P = P
-        self.Q = Q
-        self.Mmin = Mmin
-        self.Mmax = Mmax
-        self.zfit_max = zfit_max
-        # If True, the P/Q evolution is evaluated at min(z, zfit_max):
-        # beyond the LF's fitted redshift range the Schechter parameters
-        # are held at their zfit_max values instead of being
-        # exponentially extrapolated (phi* alone would otherwise grow
-        # by x4.5 at z=1 and x20 at z=2 with P=1.625, manufacturing
-        # high-z tails in the faint slices).
-        self.freeze_evolution = freeze_evolution
-        # Approximate population-mean VISTA Z-band K(z) by default
-        # (see make_polynomial_kcorr); swap in a kcorrect-derived
-        # polynomial fit from WAVES photometry via the kcorr= kwarg.
-        self.kcorr = kcorr if kcorr is not None else self.make_polynomial_kcorr()
-
-    # -----------------------------------------------------------
-    # K-corrections
-    # -----------------------------------------------------------
-    @staticmethod
-    def make_polynomial_kcorr(coeffs=(0.20, 1.00)):
-        """
-        Build K(z) = coeffs[0]*z + coeffs[1]*z^2 + ... (K(0) = 0 by
-        construction). The default (0.20, 1.00) is an APPROXIMATE
-        population-mean K(z) for the VISTA Z band -- e.g. K ~ 0.08 mag
-        at z=0.2, ~0.35 at z=0.5, ~0.80 at z=0.8 -- chosen to be
-        broadly consistent with kcorrect-style values for a mixed
-        red/blue population, and to grow faster than pure bandwidth
-        compression at z > 0.5 where the observed band moves into the
-        rest-frame blue. Replace the coefficients with a proper
-        polynomial fit of kcorrect K-corrections from WAVES/GAMA
-        photometry (ideally colour-dependent) before doing precision
-        work.
-        """
-        coeffs = np.asarray(coeffs, dtype=float)
-
-        def kcorr(z):
-            z = np.asarray(z, dtype=float)
-            out = np.zeros_like(z)
-            for i, c in enumerate(coeffs):
-                out = out + c * z ** (i + 1)
-            return out if out.ndim else float(out)
-
-        return kcorr
-
-    @staticmethod
-    def bandwidth_kcorr(z):
-        """Legacy pure bandpass-compression K-correction, 2.5 log10(1+z).
-        Kept for comparison; underestimates real Z-band K at z > ~0.5."""
-        return 2.5 * np.log10(1.0 + z)
-
-    # -----------------------------------------------------------
-    def schechter_params(self, z):
-        """
-        Evolve M*, phi* to redshift z. alpha held fixed.
-
-        If freeze_evolution is set (default), evolution is evaluated at
-        z_eff = min(z, zfit_max): the LF fit has no support beyond
-        zfit_max, so rather than extrapolating M*(z) linearly and
-        phi*(z) exponentially, both are held at their zfit_max values.
-        """
-        z_eff = min(z, self.zfit_max) if self.freeze_evolution else z
-        Mstar = self.Mstar0 - self.Q * z_eff
-        phistar = self.phistar0 * 10 ** (0.4 * self.P * z_eff)
-        return Mstar, phistar, self.alpha
-
-    def n_brighter_than(self, Mlim, z):
-        """
-        Number density (Mpc^-3) of galaxies with M < Mlim at redshift z,
-        via the unnormalized upper incomplete gamma function (mpmath
-        supports the negative, non-integer order alpha+1 that scipy
-        cannot).
-        """
-        Mstar, phistar, a = self.schechter_params(z)
-        x = 10 ** (0.4 * (Mstar - Mlim))
-        if x <= 0:
-            x = 1e-8  # avoid divergence as x -> 0 for alpha+1 <= 0
-        val = mpmath.gammainc(a + 1, x, mpmath.inf)
-        return phistar * float(val)
-
-    # -----------------------------------------------------------
-    def distance_modulus(self, z):
-        d_L = self.cosmo.luminosity_distance(z).to(u.Mpc).value
-        return 5 * np.log10(d_L) + 25
-
-    def Mlim_of_z(self, z, Zlim):
-        """M_lim(z) = Zlim - DM(z) - K(z). Q-evolution is NOT re-applied
-        here since it's already folded into schechter_params via M*(z)."""
-        return Zlim - self.distance_modulus(z) - self.kcorr(z)
-
-    def dVdz_per_sr(self, z):
-        return self.cosmo.differential_comoving_volume(z).to(u.Mpc**3 / u.sr).value
-
-    # -----------------------------------------------------------
-    def predict_dNdz(self, z_array, Zlim, area_deg2):
-        """dN/dz for all galaxies brighter than a single flux limit Zlim."""
-        area_sr = area_deg2 * (np.pi / 180.0) ** 2
-        dNdz = np.zeros_like(np.asarray(z_array, dtype=float))
-        for i, z in enumerate(z_array):
-            if z <= 0:
-                continue
-            Ml = np.clip(self.Mlim_of_z(z, Zlim), self.Mmin, self.Mmax)
-            n_z = self.n_brighter_than(Ml, z)
-            dV = self.dVdz_per_sr(z) * area_sr
-            dNdz[i] = n_z * dV
-        return dNdz
-
-    def predict_dNdz_slice(self, z_array, mag_lo, mag_hi, area_deg2):
-        """
-        dN/dz for galaxies with apparent magnitude in [mag_lo, mag_hi):
-        the difference of two cumulative flux-limited predictions
-        (fainter limit minus brighter limit).
-        """
-        dNdz_hi = self.predict_dNdz(z_array, mag_hi, area_deg2)
-        dNdz_lo = self.predict_dNdz(z_array, mag_lo, area_deg2)
-        return np.clip(dNdz_hi - dNdz_lo, 0.0, None)
-
-    # -----------------------------------------------------------
-    def plot_flux_limited(self, z_grid, samples, filename="predicted_Nz.png", dpi=150):
-        """
-        samples: list of (Zlim, area_deg2, label) tuples, e.g.
-        [(21.1, 1200.0, "WAVES-Wide"), (21.25, 65.0, "WAVES-Deep")]
-        """
-        fig, ax = plt.subplots(figsize=(7, 5))
-        for Zlim, area, label in samples:
-            dNdz = self.predict_dNdz(z_grid, Zlim, area)
-            ax.plot(z_grid, dNdz, label=f"{label} (Z<{Zlim})")
-        ax.set_xlabel("z")
-        ax.set_ylabel("dN/dz")
-        ax.legend()
-        ax.set_title("Predicted N(z) from evolving Schechter LF")
-        fig.tight_layout()
-        fig.savefig(filename, dpi=dpi)
-        print(f"Saved plot to {filename}")
-
-
-# =====================================================================
-# 3. Generalized 4-parameter fit: A * z^alpha * exp[-(z/z_c)^beta]
-# =====================================================================
-class GeneralNzFitter:
-    """
-    Fits
-
-        dN/dz(z) = A * z^alpha * exp[-(z / z_c)^beta]
-
-    independently to EACH magnitude slice, with A, alpha, z_c, beta all
-    free (4 parameters per slice, not shared/joint across slices). This
-    is a strict generalization of Baugh & Efstathiou (1993)
-    """
-
-    def __init__(self, mag_edges=None):
-        self.mag_edges = np.asarray(mag_edges) if mag_edges is not None else np.arange(16, 23, 1)
-        self.mag_centres = self.mag_edges[:-1] + 0.5
-
-        self.hist_list = []          # normalized (unit-area) target dN/dz per slice
-        self.z_grids = []            # each slice gets ITS OWN z_grid (different extent)
-        self.valid_slices = []       # list of (mlo, mhi) with data
-        self.slice_totals = []       # total predicted counts per deg^2 per slice
-        self.results = []            # list of dicts: {A, alpha, zc, beta, perr, pcov}
-
-    # -----------------------------------------------------------
-    @classmethod
-    def from_model(cls, model, mag_edges=None, n_points=500, tail_tol=1e-2):
-        """
-        Build target dN/dz shapes per magnitude slice from a
-        SchechterNzModel, with each slice's z_grid adaptively widened
-        (via find_adaptive_zmax) until it captures >= (1 - tail_tol) of
-        that slice's predicted mass, rather than sharing one fixed
-        range across all slices.
-        """
-        obj = cls(mag_edges=mag_edges)
-        any_beyond_fit = False
-
-        for mlo, mhi in zip(obj.mag_edges[:-1], obj.mag_edges[1:]):
-            z_max = find_adaptive_zmax(model, mlo, mhi, tol=tail_tol)
-            z_grid = np.linspace(1e-4, z_max, n_points)
-            dNdz = model.predict_dNdz_slice(z_grid, mlo, mhi, area_deg2=1.0)
-            total = np.trapezoid(dNdz, z_grid)
-            if total <= 0:
-                continue
-
-            if z_max > model.zfit_max:
-                any_beyond_fit = True
-
-            obj.hist_list.append(dNdz / total)   # normalize to unit area
-            obj.z_grids.append(z_grid)
-            obj.valid_slices.append((mlo, mhi))
-            obj.slice_totals.append(total)       # counts deg^-2 in the slice
-
-        if any_beyond_fit:
-            if model.freeze_evolution:
-                print(f"NOTE: some slices needed z_grid extents beyond the LF's fitted "
-                      f"range (z <= {model.zfit_max}); M*(z)/phi*(z) are FROZEN at their "
-                      f"z={model.zfit_max} values there (freeze_evolution=True), not "
-                      f"extrapolated.")
-            else:
-                print(f"NOTE: some slices needed z_grid extents beyond the LF's fitted "
-                      f"range (z <= {model.zfit_max}) to fully contain their mass -- "
-                      f"M*(z)/phi*(z) are being extrapolated there.")
-
-        return obj
-
-    # -----------------------------------------------------------
-    @staticmethod
-    def analytic_A(alpha, zc, beta):
-        """
-        A that makes A*z^alpha*exp[-(z/zc)^beta] integrate to 1 over
-        z in [0, inf):
-
-            integral = (zc^(alpha+1) / beta) * Gamma((alpha+1)/beta)
-            A = 1 / integral
-        """
-        integral = (zc ** (alpha + 1) / beta) * gamma((alpha + 1.0) / beta)
-        return 1.0 / integral
-
-    @classmethod
-    def model_func(cls, z, alpha, zc, beta):
-        """Unit-area-normalized A*z^alpha*exp[-(z/zc)^beta], with A solved analytically."""
-        A = cls.analytic_A(alpha, zc, beta)
-        return A * z**alpha * np.exp(-(z / zc) ** beta)
-
-    # -----------------------------------------------------------
-    def fit(
-        self,
-        p0=(2.0, 0.15, 1.5),
-        bounds=((0.1, 1e-4, 0.2), (8.0, 5.0, 8.0)),
-    ):
-        """
-        Fit each slice independently for (alpha, zc, beta) by
-        UNWEIGHTED least squares in LINEAR density space. A is not a
-        free parameter -- it's fixed analytically so the curve
-        integrates to 1 over [0, inf) (see analytic_A).
-
-        Known caveats of this scheme (deliberate, documented rather
-        than "fixed"):
-        - Linear-space unweighted L2 means the tall peak dominates the
-          loss; the low- and high-z tails carry little weight and can
-          be visibly poorly fit even when the peak is excellent.
-        - No `sigma` is passed to curve_fit, so pcov / the *_err values
-          reflect only the residual scatter of the unweighted fit and
-          should be treated as indicative, not as proper parameter
-          uncertainties.
-        - analytic_A normalizes over z in [0, inf) while the target
-          histograms are unit-normalized over their finite (truncated)
-          z_grid; with tail_tol=1e-2 up to ~1% of the fitted curve's
-          mass can lie beyond the grid, a small systematic in zc/beta.
-        """
-        self.results = []
-        for (mlo, mhi), density, z_grid in zip(self.valid_slices, self.hist_list, self.z_grids):
-            popt, pcov = curve_fit(
-                self.model_func, z_grid, density,
-                p0=p0, bounds=bounds, maxfev=20000,
-            )
-            perr = np.sqrt(np.diag(pcov))
-            alpha, zc, beta = popt
-            A = self.analytic_A(alpha, zc, beta)
-            self.results.append({
-                "mlo": mlo, "mhi": mhi,
-                "A": A, "alpha": alpha, "zc": zc, "beta": beta,
-                "alpha_err": perr[0], "zc_err": perr[1], "beta_err": perr[2],
-                "z_max_used": z_grid[-1],
-                "popt": popt, "pcov": pcov,
+    # Combined long-format summary across all slices, handy for plotting.
+    rows = []
+    for res in results:
+        for r, xi, err in zip(res['r_centers'], res['xi'], res['err']):
+            rows.append({
+                'mag_min': res['mag_min'], 'mag_max': res['mag_max'],
+                'n_data': res['n_data'], 'n_random': res['n_random'],
+                'r_Mpc_h': r, 'xi': xi, 'xi_err_jk': err,
             })
-        return self.results
+    summary_path = os.path.join(out_dir, f'xi_r_{region}_magslices_summary.csv')
+    pd.DataFrame(rows).to_csv(summary_path, index=False)
+    print(f"[{region}] saved combined slice summary: {summary_path}")
 
-    # -----------------------------------------------------------
-    def summary(self):
-        if not self.results:
-            raise RuntimeError("Call .fit() first.")
-        print(f"{'slice':>8} {'A':>12} {'alpha':>10} {'z_c':>10} {'beta':>10} {'peak z':>10} {'z_max used':>12}")
-        for r in self.results:
-            # mode of A*z^alpha*exp[-(z/zc)^beta] (dlnf/dz=0): z_peak = zc*(alpha/beta)^(1/beta)
-            z_peak = r["zc"] * (r["alpha"] / r["beta"]) ** (1.0 / r["beta"]) if r["alpha"] > 0 else 0.0
-            print(f"{r['mlo']:>4.0f}-{r['mhi']:<3.0f} {r['A']:12.4f} {r['alpha']:10.4f} "
-                  f"{r['zc']:10.4f} {r['beta']:10.4f} {z_peak:10.4f} {r['z_max_used']:12.2f}")
-
-    # -----------------------------------------------------------
-    def plot(self, filename="general_nz_fit.png", dpi=150):
-        n_slices = len(self.results)
-        fig, axes = plt.subplots(1, n_slices, figsize=(3 * n_slices, 3), sharey=True)
-
-        for idx, (r, density, z_grid) in enumerate(zip(self.results, self.hist_list, self.z_grids)):
-            ax = axes[idx] if n_slices > 1 else axes
-            ax.plot(z_grid, density, "o", ms=2, label="model shape")
-            fitted = self.model_func(z_grid, r["alpha"], r["zc"], r["beta"])
-            ax.plot(z_grid, fitted, "-", label="fitted template")
-            ax.set_title(f"{r['mlo']:.0f}-{r['mhi']:.0f}")
-            ax.set_xlabel("z")
-
-        (axes[0] if n_slices > 1 else axes).set_ylabel("dN/dz (normalized)")
-        (axes[0] if n_slices > 1 else axes).legend(fontsize=8)
-        plt.tight_layout()
-        plt.savefig(filename, dpi=dpi)
-        print(f"\nSaved plot to {filename}")
-
-    # -----------------------------------------------------------
-    def plot_vs_mock(
-        self,
-        model,
-        mock_df,
-        mock_area_deg2=None,
-        z_mock_max=0.8,
-        mock_maglim=21.25,
-        dz=0.02,
-        z_col="redshift_observed",
-        mag_col="mag_Z_VISTA",
-        filename="nz_vs_sharks.png",
-        dpi=150,
-    ):
-        """
-        Overplot the SHARKS mock n(z|m) histograms on the LF-model
-        predictions and fitted templates, per magnitude slice, in
-        ABSOLUTE units of counts / dz / deg^2 (so no normalization
-        ambiguity from the mock's z < z_mock_max truncation).
-
-        The SHARKS deep mock is only complete to z = 0.8 and Z < 21.25
-        over the WAVES-Deep-sized WD footprint (~50.6 deg^2):
-        - the mock histogram is only drawn up to z_mock_max, with a
-          dotted vertical line marking the truncation; the model curve
-          continues beyond it,
-        - slices that straddle the Z < 21.25 flux limit are flagged as
-          INCOMPLETE (only the m < 21.25 part of the slice is present
-          in the mock, so the mock histogram is a lower bound there),
-        - slices entirely fainter than 21.25 get no mock overlay.
-        """
-        if not self.results:
-            raise RuntimeError("Call .fit() first.")
-        if mock_area_deg2 is None:
-            mock_area_deg2 = survey_area_deg2(*WD)
-
-        bins = np.arange(0.0, z_mock_max + dz, dz)
-        centres = 0.5 * (bins[:-1] + bins[1:])
-        n_slices = len(self.results)
-        fig, axes = plt.subplots(1, n_slices, figsize=(3 * n_slices, 3.2))
-        if n_slices == 1:
-            axes = [axes]
-
-        for idx, (r, z_grid) in enumerate(zip(self.results, self.z_grids)):
-            ax = axes[idx]
-            mlo, mhi = r["mlo"], r["mhi"]
-
-            # model prediction and fitted template, per deg^2
-            model_abs = model.predict_dNdz_slice(z_grid, mlo, mhi, area_deg2=1.0)
-            total = self.slice_totals[idx]
-            fitted_abs = total * self.model_func(z_grid, r["alpha"], r["zc"], r["beta"])
-            ax.plot(z_grid, model_abs, "-", lw=1.2, label="LF model")
-            ax.plot(z_grid, fitted_abs, "--", lw=1.2, label="fitted template")
-
-            # mock overlay
-            if mlo < mock_maglim:
-                sel = (mock_df[mag_col] >= mlo) & (mock_df[mag_col] < mhi)
-                z_vals = mock_df.loc[sel, z_col].to_numpy()
-                counts, _ = np.histogram(z_vals, bins=bins)
-                y = counts / (dz * mock_area_deg2)
-                yerr = np.sqrt(counts) / (dz * mock_area_deg2)
-                ax.errorbar(centres, y, yerr=yerr, fmt=".", ms=3, lw=0.8,
-                            label="SHARKS deep", zorder=5)
-                if mhi > mock_maglim:
-                    ax.set_title(f"{mlo:.0f}-{mhi:.0f}  (mock incomplete: Z<{mock_maglim})",
-                                 fontsize=9)
-                else:
-                    ax.set_title(f"{mlo:.0f}-{mhi:.0f}", fontsize=10)
-            else:
-                ax.set_title(f"{mlo:.0f}-{mhi:.0f}  (no mock: Z<{mock_maglim})", fontsize=9)
-
-            ax.axvline(z_mock_max, ls=":", lw=0.8, color="grey")
-            ax.set_xlabel("z")
-            ax.set_xlim(0, max(z_grid[-1], z_mock_max))
-
-        axes[0].set_ylabel(r"dN/dz  [deg$^{-2}$]")
-        axes[0].legend(fontsize=7)
-        plt.tight_layout()
-        plt.savefig(filename, dpi=dpi)
-        print(f"\nSaved model-vs-SHARKS comparison to {filename} "
-              f"(mock area = {mock_area_deg2:.2f} deg^2, truncated at z = {z_mock_max})")
+    return results
 
 
-# =====================================================================
-# 4. Example usage
-# =====================================================================
-if __name__ == "__main__":
-    model = SchechterNzModel()   # freeze_evolution=True, polynomial VISTA-Z K(z)
-
-    # sanity-check plot of the original cumulative flux-limited predictions
-    z_grid = np.linspace(0.001, 0.5, 200)
-    model.plot_flux_limited(
-        z_grid,
-        samples=[(21.1, 1200.0, "WAVES-Wide"), (21.25, 65.0, "WAVES-Deep")],
-        filename="predicted_Nz.png",
+def run_single(parquet_path, region, out_dir, r_edges,
+                mag_min=None, mag_max=None,
+                factor=20, nthreads=4, n_jk=10, seed=42):
+    """Run the pipeline once, either for the full region sample or one
+    custom (mag_min, mag_max) slice."""
+    df = load_data(parquet_path)
+    tag = region
+    if mag_min is not None or mag_max is not None:
+        lo = f'{mag_min:.2f}' if mag_min is not None else 'x'
+        hi = f'{mag_max:.2f}' if mag_max is not None else 'x'
+        tag = f'{region}_mag{lo}-{hi}'
+    return run_pipeline(
+        df, region, out_dir, r_edges, tag=tag,
+        mag_min=mag_min, mag_max=mag_max,
+        factor=factor, nthreads=nthreads, n_jk=n_jk, seed=seed,
     )
 
-    gen_fitter = GeneralNzFitter.from_model(
-        model,
-        mag_edges=np.arange(16, 23, 1),
-    )
-    gen_fitter.fit()
-    gen_fitter.summary()
-    gen_fitter.plot(filename="general_nz_fit.png")
 
-    # ------------------------------------------------------------
-    # SHARKS mock comparison (WAVES-Deep region, z < 0.8, Z < 21.25)
-    # ------------------------------------------------------------
-    sharks_path = "/Users/sp624AA/Downloads/groupfinding_comp_mocks/fibre_incomplete_mocks.parquet"   # <-- set to your mock file
-    try:
-        mock = load_sharks_mock(sharks_path, region="deep")
-    except (FileNotFoundError, OSError):
-        print(f"\nSHARKS mock not found at '{sharks_path}' -- skipping overlay.")
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(description="Measure xi(r) for a WAVES wide/deep mock.")
+    p.add_argument('--input', required=True, help='Path to mock parquet file')
+    p.add_argument('--region', choices=['wide', 'deep'], required=True)
+    p.add_argument('--outdir', default='./xi_output')
+    p.add_argument('--rmin', type=float, default=0.1, help='Mpc/h')
+    p.add_argument('--rmax', type=float, default=50.0, help='Mpc/h')
+    p.add_argument('--nbins', type=int, default=15)
+    p.add_argument('--factor', type=int, default=20, help='random-to-data ratio')
+    p.add_argument('--nthreads', type=int, default=4)
+    p.add_argument('--njk', type=int, default=10)
+    p.add_argument('--seed', type=int, default=42)
+
+    p.add_argument('--magslices', action='store_true',
+                    help="Deep only: run all 5 standard Z-mag slices "
+                         "(16-17.5, 17.5-18.5, 18.5-19.5, 19.5-20.5, 20.5-21.25) "
+                         "instead of the full sample.")
+    p.add_argument('--magmin', type=float, default=None,
+                    help='Optional: run a single custom mag_Z_VISTA slice, lower bound.')
+    p.add_argument('--magmax', type=float, default=None,
+                    help='Optional: run a single custom mag_Z_VISTA slice, upper bound.')
+
+    args = p.parse_args()
+
+    r_edges = np.logspace(np.log10(args.rmin), np.log10(args.rmax), args.nbins + 1)
+
+    if args.magslices:
+        if args.region != 'deep':
+            raise SystemExit("--magslices is only supported for --region deep")
+        run_mag_slices(
+            args.input, args.region, args.outdir, r_edges,
+            factor=args.factor, nthreads=args.nthreads,
+            n_jk=args.njk, seed=args.seed,
+        )
     else:
-        gen_fitter.plot_vs_mock(
-            model,
-            mock,
-            mock_area_deg2=survey_area_deg2(*WD),   # ~50.6 deg^2, exact spherical area
-            z_mock_max=0.8,
-            mock_maglim=21.25,
-            filename="nz_vs_sharks.png",
+        run_single(
+            args.input, args.region, args.outdir, r_edges,
+            mag_min=args.magmin, mag_max=args.magmax,
+            factor=args.factor, nthreads=args.nthreads,
+            n_jk=args.njk, seed=args.seed,
         )
