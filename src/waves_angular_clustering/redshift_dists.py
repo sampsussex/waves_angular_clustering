@@ -286,7 +286,7 @@ class GeneralNzFitter:
 
     def __init__(self, mag_edges=None):
         self.mag_edges = np.asarray(mag_edges) if mag_edges is not None else np.arange(16, 23, 1)
-        self.mag_centres = self.mag_edges[:-1] + 0.5
+        self.mag_centres = self.mag_edges[:-1] + self.mag_edges[1:] / 2.0
 
         self.hist_list = []          # normalized (unit-area) target dN/dz per slice
         self.z_grids = []            # each slice gets ITS OWN z_grid (different extent)
@@ -634,6 +634,7 @@ if __name__ == "__main__":
 
     # sanity-check plot of the original cumulative flux-limited predictions
     z_grid = np.linspace(0.001, 0.5, 200)
+    mag_edges = np.array([16, 17.5, 18.5, 19.5, 20.5, 21.25, 22])
     model.plot_flux_limited(
         z_grid,
         samples=[(21.1, 1200.0, "WAVES-Wide"), (21.25, 65.0, "WAVES-Deep")],
@@ -642,7 +643,7 @@ if __name__ == "__main__":
 
     gen_fitter = GeneralNzFitter.from_model(
         model,
-        mag_edges=np.arange(16, 23, 1),
+        mag_edges=mag_edges,
     )
     gen_fitter.fit()
     gen_fitter.summary()
