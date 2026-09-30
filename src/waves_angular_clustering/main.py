@@ -10,7 +10,7 @@ if __name__ == '__main__':
         n_randoms_filepath = '/mnt/lustre/projects/astro/general/sp624/waves_randoms/waves-wide_n_randoms.parquet',
         s_randoms_filepath = '/mnt/lustre/projects/astro/general/sp624/waves_randoms/waves-wide_s_randoms.parquet',
         results_directory  = '/mnt/lustre/projects/astro/general/sp624/angular_clustering_waves/20260930_magslices_total_mask++_final_NO_DET16/',
-        additional_masking=True, 
+        additional_masking=False, 
         mask_rectangles_filepath='/its/home/sp624/angular_clustering_waves/waves_angular_clustering/src/detector_16/viking_det16_masks.json',
     )
 
