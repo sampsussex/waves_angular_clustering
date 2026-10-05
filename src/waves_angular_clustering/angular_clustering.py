@@ -13,9 +13,9 @@ from matplotlib.collections import PatchCollection
 
 class AngularClustering:
     def __init__(self, ra_cat, dec_cat, ra_rand, dec_rand, selection_dic,
-                 min_sep=0.01, max_sep=10, nbins=30, sep_units='degrees',
+                 min_sep=0.01, max_sep=5, nbins=15, sep_units='degrees',
                  cat_units='degrees', rand_units='degrees',
-                 n_patch=20, var_method='jackknife', ):
+                 n_patch=40, var_method='jackknife', ):
         self.ra_cat = ra_cat
         self.dec_cat = dec_cat
         self.ra_rand = ra_rand
@@ -37,7 +37,9 @@ class AngularClustering:
             'columns': {
                 'xi': None,
                 'varxi': None,
-                'meanlogr': None
+                'meanlogr': None,
+                'cov': None,        # full nbins x nbins covariance of xi
+                'corr_matrix': None # normalised covariance (diagnostics)
             }
         }
 
@@ -78,19 +80,29 @@ class AngularClustering:
         )
         rr.process(self.rand_cat)
 
-                # In AngularClustering.do_correlations(), after rr.process(self.rand_cat):
-        self.dd = dd   # expose for diagnostics
-        self.dr = dr
-        self.rr = rr
-
+        self.dd, self.dr, self.rr = dd, dr, rr
 
         self.xi, self.varxi = dd.calculateXi(rr=rr, dr=dr)
         self.meanlogr = dd.meanlogr
+
+        # Covariance of the full Landy-Szalay estimator, resampling
+        # DD, DR and RR together over the patches.
+        def _ls_xi(corrs):
+            d, r_cross, r = corrs
+            return d.calculateXi(rr=r, dr=r_cross)[0]
+
+        self.cov = treecorr.estimate_multi_cov(
+            [dd, dr, rr], self.var_method, func=_ls_xi
+        )
+        sig = np.sqrt(np.diag(self.cov))
+        self.corr_matrix = self.cov / np.outer(sig, sig)
 
         # Store as lists so they are JSON-serialisable
         self.results['columns']['xi'] = self.xi.tolist()
         self.results['columns']['varxi'] = self.varxi.tolist()
         self.results['columns']['meanlogr'] = self.meanlogr.tolist()
+        self.results['columns']['cov'] = self.cov.tolist()
+        self.results['columns']['corr_matrix'] = self.corr_matrix.tolist()
 
     def save_results(self, save_location):
         with open(save_location, 'w') as f:
@@ -129,9 +141,11 @@ class WavesWideClustering:
         # Treecorr binning settings — shared by all AngularClustering instances
         # and used when reconstructing an RR object from cache.
         self.min_sep   = 0.01
-        self.max_sep   = 10
-        self.nbins     = 30
+        self.max_sep   = 5.
+        self.nbins     = 15
         self.sep_units = 'degrees'
+        self.n_patch = 40
+        self.var_method = 'jackknife'
 
         self.additional_masking = additional_masking
 
@@ -246,12 +260,12 @@ class WavesWideClustering:
             [[222, 222.2], [-2.6, -2.4]], 
             # Second round now
             [[193.83609, 194.07850], [3.07944, 3.72563]],
-            [[206.39667, 206.4282], [-1.94328, -2.00215]],
+            [[206.39667, 206.4282], [-2.00215, -1.94328]],
             # second round south
             [[49.19606, 49.24780], [-35.56821, -35.52108]],
             [[39.33455, 39.35917], [-27.11029, -27.05638]],
             [[26.08654, 26.10927], [-34.87380, -34.71018]], 
-            [[18.48791, 18.40237], [-31.78340, -31.71164]],
+            [[18.40237, 18.48791], [-31.78340, -31.71164]],
             [[27.27533, 27.36315], [-35.30838, -35.25087]], 
             [[40.14193, 40.17527], [-30.06847, -29.96956]], 
             [[18.144, 18.17667], [-33.68253, -33.64995]], 
@@ -306,8 +320,13 @@ class WavesWideClustering:
         return os.path.join(self.results_directory, self._selection_to_filename(selection))
 
     def _check_if_results_exist(self, selection):
-        """Return True if results have already been saved for this selection."""
-        return os.path.isfile(self._get_results_path(selection))
+        path = self._get_results_path(selection)
+        if not os.path.isfile(path):
+            return False
+        # Treat old files with no covariance as not-yet-run
+        with open(path, 'r') as f:
+            cols = json.load(f).get('columns', {})
+        return cols.get('cov') is not None
 
     def _get_filepaths_for_selection(self, selection):
         """Return (photom_fp, stargal_fp, randoms_fp) for a given region."""
@@ -845,16 +864,14 @@ class WavesWideClustering:
             selection_dic=selection,
             min_sep=self.min_sep, max_sep=self.max_sep,
             nbins=self.nbins, sep_units=self.sep_units,
+            n_patch=self.n_patch, var_method=self.var_method,
         )
-        print("  Computing correlations...")
-        print("  Computing DD, DR, RR, and xi...")
+        print("  Computing DD, DR, RR, xi and covariance...")
         ac.do_correlations()
         print("  Clustering computation complete.")
         save_path = self._get_results_path(selection)
-        ac.do_correlations()
-        print("  Clustering computation complete.")
-        print("  Saving DD/DR/RR diagnostic plot and raw values...")   # new
-        self.plot_dd_dr_rr(ac.dd, ac.dr, ac.rr, selection)            # new
+        print("  Saving DD/DR/RR diagnostic plot and raw values...")
+        self.plot_dd_dr_rr(ac.dd, ac.dr, ac.rr, selection)
         print(f"  Saving results to {save_path}...")
         os.makedirs(self.results_directory, exist_ok=True)
         ac.save_results(save_path)
